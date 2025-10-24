@@ -13,7 +13,6 @@ const DB_NAME = process.env.DB_NAME || 'tuitionmanager';
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
 const PORT = parseInt(process.env.PORT, 10) || 3001; // Convert to number
 
-
 /* ========= Mongo Connection ========= */
 mongoose.set('strictQuery', true);
 mongoose.connect(MONGODB_URI, { dbName: DB_NAME })
@@ -90,9 +89,11 @@ const Exam = mongoose.model('Exam', ExamSchema);
 function nowIso() {
   return new Date().toISOString();
 }
+
 function signToken(user) {
   return jwt.sign({ sub: user._id.toString(), role: user.role }, JWT_SECRET, { expiresIn: '30d' });
 }
+
 function authRequired(req, res, next) {
   const auth = req.headers.authorization || '';
   const [bearer, token] = auth.split(' ');
@@ -106,6 +107,7 @@ function authRequired(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 }
+
 function generateStudentCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -256,7 +258,7 @@ app.get('/api/teacher/classes', authRequired, async (req, res) => {
       dayOfWeek: r.dayOfWeek,
       startTime: r.startTime,
       endTime: r.endTime
-    }));
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
