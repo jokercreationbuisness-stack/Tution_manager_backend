@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: tuitionmanager-backend
-    env: node
-    plan: free
-    buildCommand: npm install
-    startCommand: npm start
