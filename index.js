@@ -8,12 +8,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const {
-  MONGODB_URI = 'mongodb://localhost:27017',
-  DB_NAME = 'tuitionmanager',
-  JWT_SECRET = 'dev_secret',
-  PORT = 3001
-} = process.env;
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
+const DB_NAME = process.env.DB_NAME || 'tuitionmanager';
+const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
+const PORT = parseInt(process.env.PORT, 10) || 3001; // Convert to number
+
 
 /* ========= Mongo Connection ========= */
 mongoose.set('strictQuery', true);
