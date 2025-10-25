@@ -1,22 +1,26 @@
 {
   "name": "tuition-manager-backend",
   "version": "1.0.0",
-  "description": "Backend for Tuition Manager - Student Teacher Management System",
-  "main": "index.js",
+  "description": "Complete backend for Tuition Manager Mobile App - Student Teacher Management System",
+  "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
-    "prod": "NODE_ENV=production node index.js",
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "prod": "NODE_ENV=production node server.js",
     "test": "jest"
   },
   "keywords": [
     "tuition",
     "education",
-    "management",
+    "mobile-app",
     "student",
     "teacher",
-    "scheduling"
+    "scheduling",
+    "management",
+    "react-native",
+    "flutter",
+    "api"
   ],
   "author": "Your Name",
   "license": "MIT",
@@ -30,7 +34,9 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.6.1",
-    "morgan": "^1.10.0"
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "socket.io": "^4.7.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.4",
@@ -42,6 +48,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "your-repository-url"
-  }
+    "url": "https://github.com/your-username/tuition-manager-backend"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/tuition-manager-backend/issues"
+  },
+  "homepage": "https://github.com/your-username/tuition-manager-backend#readme"
 }
