@@ -1,13 +1,15 @@
-// server.js
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const morgan = require('morgan');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(morgan('dev'));
 
 // Config
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
@@ -48,7 +50,7 @@ const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLi
 const ClassSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   subject: { type: String, required: true },
-  dayOfWeek: { type: Number, required: true }, // 1-7
+  dayOfWeek: { type: Number, required: true }, // 1-7 (Calendar)
   startTime: { type: String, required: true }, // HH:mm
   endTime: { type: String, required: true },   // HH:mm
   colorHex: { type: String },
@@ -64,8 +66,8 @@ const ClassModel = mongoose.model('Class', ClassSchema);
 const AssignmentSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true },
-  dueAt: { type: String }, // ISO-8601 (string)
-  classId: { type: String }, // store as string ID
+  dueAt: { type: String }, // ISO-8601
+  classId: { type: String }, // store class _id as string (optional)
   notes: { type: String },
   priority: { type: Number, default: 0 },
   scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
@@ -88,7 +90,7 @@ const Note = mongoose.model('Note', NoteSchema);
 const ExamSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true },
-  whenAt: { type: String, required: true }, // ISO-8601 (string)
+  whenAt: { type: String, required: true }, // ISO-8601
   classId: { type: String },
   location: { type: String },
   notes: { type: String },
@@ -112,11 +114,11 @@ const ResultSchema = new Schema({
 });
 const Result = mongoose.model('Result', ResultSchema);
 
-// Attendance: per class per date; marks is a list of student presence
+// Attendance
 const AttendanceSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
-  classId: { type: String, required: true }, // Class id (string)
-  date: { type: String, required: true },    // yyyy-MM-dd
+  classId: { type: String, required: true },
+  date: { type: String, required: true }, // yyyy-MM-dd
   marks: [
     {
       studentId: { type: Types.ObjectId, ref: 'User', required: true },
@@ -163,7 +165,6 @@ async function ensureTeacherOwnsStudent(teacherId, studentId) {
 }
 
 /* ========= Auth ========= */
-// POST /api/auth/signup -> { token, userId }
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const { name, email, mobile, password, role } = req.body || {};
@@ -189,7 +190,6 @@ app.post('/api/auth/signup', async (req, res) => {
   }
 });
 
-// POST /api/auth/login -> { token, userId }
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -214,7 +214,6 @@ app.get('/api/student/code', authRequired, async (req, res) => {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     if (!user.studentCode) {
-      // generate unique code
       let code, collision;
       do {
         code = generateStudentCode();
@@ -230,7 +229,6 @@ app.get('/api/student/code', authRequired, async (req, res) => {
   }
 });
 
-/* ========= Student: Fetch Data (needed by student dashboard) ========= */
 // GET /api/student/teachers
 app.get('/api/student/teachers', authRequired, async (req, res) => {
   try {
@@ -257,22 +255,20 @@ app.get('/api/student/classes', authRequired, async (req, res) => {
     if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
     const teacherIds = links.map((l) => l.teacherId);
-    const classes = await ClassModel.find({
+    const rows = await ClassModel.find({
       teacherId: { $in: teacherIds },
       $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
     }).sort({ dayOfWeek: 1, startTime: 1 }).lean();
-    return res.json(
-      classes.map((c) => ({
-        id: c._id.toString(),
-        subject: c.subject,
-        dayOfWeek: c.dayOfWeek,
-        startTime: c.startTime,
-        endTime: c.endTime,
-        colorHex: c.colorHex || null,
-        notes: c.notes || null,
-        location: c.location || null
-      }))
-    );
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      subject: r.subject,
+      dayOfWeek: r.dayOfWeek,
+      startTime: r.startTime,
+      endTime: r.endTime,
+      colorHex: r.colorHex || null,
+      notes: r.notes || null,
+      location: r.location || null
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -284,20 +280,18 @@ app.get('/api/student/assignments', authRequired, async (req, res) => {
     if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
     const teacherIds = links.map((l) => l.teacherId);
-    const assignments = await Assignment.find({
+    const rows = await Assignment.find({
       teacherId: { $in: teacherIds },
       $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
     }).sort({ dueAt: 1, createdAt: -1 }).lean();
-    return res.json(
-      assignments.map((a) => ({
-        id: a._id.toString(),
-        title: a.title,
-        dueAt: a.dueAt || null,
-        classId: a.classId || null,
-        notes: a.notes || null,
-        priority: a.priority || 0
-      }))
-    );
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      dueAt: r.dueAt || null,
+      classId: r.classId || null,
+      notes: r.notes || null,
+      priority: Number.isInteger(r.priority) ? r.priority : 0
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -309,18 +303,16 @@ app.get('/api/student/notes', authRequired, async (req, res) => {
     if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
     const teacherIds = links.map((l) => l.teacherId);
-    const notes = await Note.find({
+    const rows = await Note.find({
       teacherId: { $in: teacherIds },
       $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
     }).sort({ createdAt: -1 }).lean();
-    return res.json(
-      notes.map((n) => ({
-        id: n._id.toString(),
-        title: n.title,
-        content: n.content || null,
-        subject: n.subject || null
-      }))
-    );
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      content: r.content || null,
+      subject: r.subject || null
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -332,20 +324,18 @@ app.get('/api/student/exams', authRequired, async (req, res) => {
     if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
     const teacherIds = links.map((l) => l.teacherId);
-    const exams = await Exam.find({
+    const rows = await Exam.find({
       teacherId: { $in: teacherIds },
       $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
     }).sort({ whenAt: 1 }).lean();
-    return res.json(
-      exams.map((e) => ({
-        id: e._id.toString(),
-        title: e.title,
-        whenAt: e.whenAt,
-        classId: e.classId || null,
-        location: e.location || null,
-        notes: e.notes || null
-      }))
-    );
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      whenAt: r.whenAt,
+      classId: r.classId || null,
+      location: r.location || null,
+      notes: r.notes || null
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -355,25 +345,22 @@ app.get('/api/student/exams', authRequired, async (req, res) => {
 app.get('/api/student/results', authRequired, async (req, res) => {
   try {
     if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
-    const results = await Result.find({ studentId: req.userId }).sort({ createdAt: -1 }).lean();
-    return res.json(
-      results.map((r) => ({
-        id: r._id.toString(),
-        examTitle: r.examTitle,
-        subject: r.subject || null,
-        totalMarks: r.totalMarks,
-        obtainedMarks: r.obtainedMarks,
-        remarks: r.remarks || null,
-        createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
-      }))
-    );
+    const rows = await Result.find({ studentId: req.userId }).sort({ createdAt: -1 }).lean();
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      examTitle: r.examTitle,
+      subject: r.subject || null,
+      totalMarks: r.totalMarks,
+      obtainedMarks: r.obtainedMarks,
+      remarks: r.remarks || null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
 /* ========= Teacher: link/list/unlink students ========= */
-// POST /api/teacher/link-student { code }
 app.post('/api/teacher/link-student', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -393,14 +380,12 @@ app.post('/api/teacher/link-student', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/students -> [{ id, name, email, mobile, code }]
 app.get('/api/teacher/students', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ teacherId: req.userId })
       .populate('studentId', 'name email mobile studentCode')
       .lean();
-
     const result = links.map((l) => ({
       id: l.studentId._id.toString(),
       name: l.studentId.name,
@@ -414,7 +399,6 @@ app.get('/api/teacher/students', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/teacher/students/:id
 app.delete('/api/teacher/students/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -428,7 +412,6 @@ app.delete('/api/teacher/students/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher: Classes ========= */
-// POST /api/teacher/classes
 app.post('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -443,9 +426,7 @@ app.post('/api/teacher/classes', authRequired, async (req, res) => {
         const s = await User.findOne({ studentCode, role: 'STUDENT' }).lean();
         if (!s) return res.status(404).json({ error: 'Student not found' });
         linkedStudentId = s._id;
-      } else if (studentId) {
-        linkedStudentId = studentId;
-      }
+      } else if (studentId) linkedStudentId = studentId;
       if (linkedStudentId) {
         const ok = await ensureTeacherOwnsStudent(req.userId, linkedStudentId);
         if (!ok) return res.status(403).json({ error: 'Not linked to student' });
@@ -471,7 +452,6 @@ app.post('/api/teacher/classes', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/classes
 app.get('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -497,14 +477,37 @@ app.get('/api/teacher/classes', authRequired, async (req, res) => {
       location: r.location || null,
       scope: r.scope || 'ALL',
       studentId: r.studentId ? r.studentId.toString() : null,
-      studentName: r.studentId ? (nameMap.get(r.studentId.toString()) || null) : null
+      studentName: r.studentId ? (nameMap.get(r.studentId.toString()) || null) : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
     })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// PUT /api/teacher/classes/:id
+app.get('/api/teacher/classes/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const r = await ClassModel.findOne({ _id: req.params.id, teacherId: req.userId }).lean();
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    return res.json({
+      id: r._id.toString(),
+      subject: r.subject,
+      dayOfWeek: r.dayOfWeek,
+      startTime: r.startTime,
+      endTime: r.endTime,
+      colorHex: r.colorHex || null,
+      notes: r.notes || null,
+      location: r.location || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    });
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.put('/api/teacher/classes/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -534,7 +537,6 @@ app.put('/api/teacher/classes/:id', authRequired, async (req, res) => {
         update.scope = 'INDIVIDUAL';
       }
     }
-
     const doc = await ClassModel.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     return res.status(204).send();
@@ -543,7 +545,6 @@ app.put('/api/teacher/classes/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/teacher/classes/:id
 app.delete('/api/teacher/classes/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -587,8 +588,39 @@ app.post('/api/teacher/assignments', authRequired, async (req, res) => {
 app.get('/api/teacher/assignments', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const rows = await Assignment.find({ teacherId: req.userId }, 'title dueAt').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title, dueAt: r.dueAt || null })));
+    const rows = await Assignment.find({ teacherId: req.userId }).sort({ createdAt: -1 }).lean();
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      dueAt: r.dueAt || null,
+      classId: r.classId || null,
+      notes: r.notes || null,
+      priority: Number.isInteger(r.priority) ? r.priority : 0,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    })));
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/teacher/assignments/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const r = await Assignment.findOne({ _id: req.params.id, teacherId: req.userId }).lean();
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    return res.json({
+      id: r._id.toString(),
+      title: r.title,
+      dueAt: r.dueAt || null,
+      classId: r.classId || null,
+      notes: r.notes || null,
+      priority: Number.isInteger(r.priority) ? r.priority : 0,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    });
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -654,8 +686,35 @@ app.post('/api/teacher/notes', authRequired, async (req, res) => {
 app.get('/api/teacher/notes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const rows = await Note.find({ teacherId: req.userId }, 'title').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title })));
+    const rows = await Note.find({ teacherId: req.userId }).sort({ createdAt: -1 }).lean();
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      content: r.content || null,
+      subject: r.subject || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    })));
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/teacher/notes/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const r = await Note.findOne({ _id: req.params.id, teacherId: req.userId }).lean();
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    return res.json({
+      id: r._id.toString(),
+      title: r.title,
+      content: r.content || null,
+      subject: r.subject || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    });
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -723,8 +782,39 @@ app.post('/api/teacher/exams', authRequired, async (req, res) => {
 app.get('/api/teacher/exams', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const rows = await Exam.find({ teacherId: req.userId }, 'title whenAt').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title, whenAt: r.whenAt })));
+    const rows = await Exam.find({ teacherId: req.userId }).sort({ createdAt: -1 }).lean();
+    return res.json(rows.map((r) => ({
+      id: r._id.toString(),
+      title: r.title,
+      whenAt: r.whenAt,
+      classId: r.classId || null,
+      location: r.location || null,
+      notes: r.notes || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    })));
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/teacher/exams/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const r = await Exam.findOne({ _id: req.params.id, teacherId: req.userId }).lean();
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    return res.json({
+      id: r._id.toString(),
+      title: r.title,
+      whenAt: r.whenAt,
+      classId: r.classId || null,
+      location: r.location || null,
+      notes: r.notes || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+    });
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -762,7 +852,6 @@ app.delete('/api/teacher/exams/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher: Results ========= */
-// POST /api/teacher/results
 app.post('/api/teacher/results', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -774,7 +863,6 @@ app.post('/api/teacher/results', authRequired, async (req, res) => {
       totalMarks,
       obtainedMarks,
       remarks,
-      scope,       // ignored for results; always individual
       studentId
     } = req.body || {};
 
@@ -808,7 +896,6 @@ app.post('/api/teacher/results', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/results
 app.get('/api/teacher/results', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -835,7 +922,6 @@ app.get('/api/teacher/results', authRequired, async (req, res) => {
   }
 });
 
-// PUT /api/teacher/results/:id
 app.put('/api/teacher/results/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -864,8 +950,6 @@ app.delete('/api/teacher/results/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Attendance ========= */
-// POST /api/teacher/attendance
-// Body: { classId: string, date: yyyy-MM-dd, marks: [{ studentId, present }] }
 app.post('/api/teacher/attendance', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -896,7 +980,6 @@ app.post('/api/teacher/attendance', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher analytics per student ========= */
-// GET /api/teacher/analytics/:studentId -> { attended, missed, cancelled, attendanceRate }
 app.get('/api/teacher/analytics/:studentId', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -911,7 +994,7 @@ app.get('/api/teacher/analytics/:studentId', authRequired, async (req, res) => {
       if (!rec) continue;
       if (rec.present) attended++; else missed++;
     }
-    const cancelled = 0;
+    const cancelled = 0; // (keep for future if needed)
     const total = attended + missed;
     const attendanceRate = total > 0 ? attended / total : null;
 
