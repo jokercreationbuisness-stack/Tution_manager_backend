@@ -480,6 +480,15 @@ app.delete('/api/teacher/exams/:id', authRequired, async (req, res) => {
   }
 });
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    message: "Server is healthy",
+    uptime: process.uptime(),
+  });
+});
+
+
 /* ========= Health ========= */
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
