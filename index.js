@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -8,16 +9,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Config
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const DB_NAME = process.env.DB_NAME || 'tuitionmanager';
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret';
-const PORT = parseInt(process.env.PORT, 10) || 3001; // Convert to number
+const PORT = parseInt(process.env.PORT, 10) || 3001;
 
-/* ========= Mongo Connection ========= */
+// Mongo
 mongoose.set('strictQuery', true);
-mongoose.connect(MONGODB_URI, { dbName: DB_NAME })
+mongoose
+  .connect(MONGODB_URI, { dbName: DB_NAME })
   .then(() => console.log('Mongo connected'))
-  .catch(err => { console.error('Mongo connect error', err); process.exit(1); });
+  .catch((err) => {
+    console.error('Mongo connect error', err);
+    process.exit(1);
+  });
 
 /* ========= Schemas & Models ========= */
 const { Schema, Types } = mongoose;
@@ -41,6 +47,7 @@ const TeacherStudentLinkSchema = new Schema({
 TeacherStudentLinkSchema.index({ teacherId: 1, studentId: 1 }, { unique: true });
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
 
+// Classes can optionally be scoped to a single student
 const ClassSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   subject: { type: String, required: true },
@@ -50,17 +57,22 @@ const ClassSchema = new Schema({
   colorHex: { type: String },
   notes: { type: String },
   location: { type: String },
+  scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
+  studentId: { type: Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 const ClassModel = mongoose.model('Class', ClassSchema);
 
+// Assignments/Notes/Exams can be scoped to a specific student
 const AssignmentSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true },
   dueAt: { type: String }, // ISO-8601 (string)
-  classId: { type: String }, // optional: store as string ID
+  classId: { type: String }, // store as string ID
   notes: { type: String },
   priority: { type: Number, default: 0 },
+  scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
+  studentId: { type: Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 const Assignment = mongoose.model('Assignment', AssignmentSchema);
@@ -70,6 +82,8 @@ const NoteSchema = new Schema({
   title: { type: String, required: true },
   content: { type: String },
   subject: { type: String },
+  scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
+  studentId: { type: Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 const Note = mongoose.model('Note', NoteSchema);
@@ -81,9 +95,41 @@ const ExamSchema = new Schema({
   classId: { type: String },
   location: { type: String },
   notes: { type: String },
+  scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
+  studentId: { type: Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 const Exam = mongoose.model('Exam', ExamSchema);
+
+// Results (marks & remarks)
+const ResultSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  studentId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  examId: { type: String, default: null }, // optional cross-ref to Exam _id string
+  examTitle: { type: String, required: true },
+  subject: { type: String, default: null },
+  totalMarks: { type: Number, required: true },
+  obtainedMarks: { type: Number, required: true },
+  remarks: { type: String, default: null },
+  createdAt: { type: Date, default: Date.now }
+});
+const Result = mongoose.model('Result', ResultSchema);
+
+// Attendance: per class per date; marks is a list of student presence
+const AttendanceSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  classId: { type: String, required: true }, // Class id (string)
+  date: { type: String, required: true },    // yyyy-MM-dd
+  marks: [
+    {
+      studentId: { type: Types.ObjectId, ref: 'User', required: true },
+      present: { type: Boolean, required: true }
+    }
+  ],
+  createdAt: { type: Date, default: Date.now }
+});
+AttendanceSchema.index({ teacherId: 1, classId: 1, date: 1 }, { unique: true });
+const Attendance = mongoose.model('Attendance', AttendanceSchema);
 
 /* ========= Helpers ========= */
 function nowIso() {
@@ -91,7 +137,7 @@ function nowIso() {
 }
 
 function signToken(user) {
-  return jwt.sign({ sub: user._id.toString(), role: user.role }, JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign({ sub: user._id.toString(), role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '30d' });
 }
 
 function authRequired(req, res, next) {
@@ -113,6 +159,19 @@ function generateStudentCode() {
   let code = '';
   for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
   return code;
+}
+
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+function defaultEndTime(startHHmm) {
+  if (!startHHmm || !/^\d{2}:\d{2}$/.test(startHHmm)) return startHHmm || '00:00';
+  const [hh, mm] = startHHmm.split(':').map((x) => parseInt(x, 10));
+  const endH = (hh + 1) % 24;
+  return pad2(endH) + ':' + pad2(mm);
+}
+
+async function ensureTeacherOwnsStudent(teacherId, studentId) {
+  const link = await TeacherStudentLink.findOne({ teacherId, studentId }).lean();
+  return !!link;
 }
 
 /* ========= Auth ========= */
@@ -171,7 +230,6 @@ app.get('/api/student/code', authRequired, async (req, res) => {
       let code, collision;
       do {
         code = generateStudentCode();
-        // sparse unique index used; check manually to avoid dup
         collision = await User.findOne({ studentCode: code }).lean();
       } while (collision);
       user.studentCode = code;
@@ -184,7 +242,7 @@ app.get('/api/student/code', authRequired, async (req, res) => {
   }
 });
 
-/* ========= Teacher: link/list students ========= */
+/* ========= Teacher: link/list/unlink students ========= */
 // POST /api/teacher/link-student { code }
 app.post('/api/teacher/link-student', authRequired, async (req, res) => {
   try {
@@ -205,21 +263,35 @@ app.post('/api/teacher/link-student', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/students -> [{ id, name, email, mobile }]
+// GET /api/teacher/students -> [{ id, name, email, mobile, code }]
 app.get('/api/teacher/students', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const links = await TeacherStudentLink.find({ teacherId: req.userId })
-      .populate('studentId', 'name email mobile')
+      .populate('studentId', 'name email mobile studentCode')
       .lean();
 
-    const result = links.map(l => ({
+    const result = links.map((l) => ({
       id: l.studentId._id.toString(),
       name: l.studentId.name,
       email: l.studentId.email,
-      mobile: l.studentId.mobile || null
+      mobile: l.studentId.mobile || null,
+      code: l.studentId.studentCode || null
     }));
     return res.json(result);
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/teacher/students/:id
+app.delete('/api/teacher/students/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const studentId = req.params.id;
+    const del = await TeacherStudentLink.deleteOne({ teacherId: req.userId, studentId });
+    if (!del.deletedCount) return res.status(404).json({ error: 'Not found' });
+    return res.status(204).send();
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -230,15 +302,30 @@ app.get('/api/teacher/students', authRequired, async (req, res) => {
 app.post('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const { subject, dayOfWeek, startTime, endTime, colorHex, notes, location } = req.body || {};
-    if (!subject || !dayOfWeek || !startTime || !endTime) return res.status(400).json({ error: 'Invalid payload' });
+    let { subject, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body || {};
+    if (!subject || !dayOfWeek || !startTime) return res.status(400).json({ error: 'Invalid payload' });
+    if (!endTime) endTime = defaultEndTime(startTime);
+
+    // If INDIVIDUAL, optionally validate link
+    let student = null;
+    if (scope === 'INDIVIDUAL' && studentId) {
+      student = await User.findOne({ _id: studentId, role: 'STUDENT' }).lean();
+      if (!student) return res.status(404).json({ error: 'Student not found' });
+      const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
 
     await ClassModel.create({
       teacherId: req.userId,
-      subject, dayOfWeek, startTime, endTime,
+      subject,
+      dayOfWeek,
+      startTime,
+      endTime,
       colorHex: colorHex || null,
       notes: notes || null,
       location: location || null,
+      scope: scope === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'ALL',
+      studentId: student ? student._id : null,
       createdAt: nowIso()
     });
     return res.status(204).send();
@@ -252,13 +339,15 @@ app.get('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const rows = await ClassModel.find({ teacherId: req.userId }, 'subject dayOfWeek startTime endTime').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map(r => ({
-      id: r._id.toString(),
-      subject: r.subject,
-      dayOfWeek: r.dayOfWeek,
-      startTime: r.startTime,
-      endTime: r.endTime
-    })));
+    return res.json(
+      rows.map((r) => ({
+        id: r._id.toString(),
+        subject: r.subject,
+        dayOfWeek: r.dayOfWeek,
+        startTime: r.startTime,
+        endTime: r.endTime
+      }))
+    );
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -270,8 +359,15 @@ app.put('/api/teacher/classes/:id', authRequired, async (req, res) => {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.id;
     const update = {};
-    const keys = ['subject','dayOfWeek','startTime','endTime','colorHex','notes','location'];
+    const keys = ['subject', 'dayOfWeek', 'startTime', 'endTime', 'colorHex', 'notes', 'location', 'scope', 'studentId'];
     for (const k of keys) if (k in req.body) update[k] = req.body[k];
+    if (update.startTime && !update.endTime) update.endTime = defaultEndTime(update.startTime);
+
+    // If making INDIVIDUAL link ensure ownership
+    if (update.scope === 'INDIVIDUAL' && update.studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, update.studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
 
     const doc = await ClassModel.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
     if (!doc) return res.status(404).json({ error: 'Not found' });
@@ -295,12 +391,16 @@ app.delete('/api/teacher/classes/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher: Assignments ========= */
-// POST /api/teacher/assignments
 app.post('/api/teacher/assignments', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const { title, dueAt, classId, notes, priority } = req.body || {};
+    const { title, dueAt, classId, notes, priority, scope, studentId } = req.body || {};
     if (!title) return res.status(400).json({ error: 'Title required' });
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     await Assignment.create({
       teacherId: req.userId,
       title,
@@ -308,6 +408,8 @@ app.post('/api/teacher/assignments', authRequired, async (req, res) => {
       classId: classId || null,
       notes: notes || null,
       priority: Number.isInteger(priority) ? priority : 0,
+      scope: scope === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? (studentId || null) : null,
       createdAt: nowIso()
     });
     return res.status(204).send();
@@ -316,26 +418,27 @@ app.post('/api/teacher/assignments', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/assignments -> [{ id, title, dueAt }]
 app.get('/api/teacher/assignments', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const rows = await Assignment.find({ teacherId: req.userId }, 'title dueAt').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map(r => ({ id: r._id.toString(), title: r.title, dueAt: r.dueAt || null })));
+    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title, dueAt: r.dueAt || null })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// PUT /api/teacher/assignments/:id
 app.put('/api/teacher/assignments/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.id;
     const update = {};
-    const keys = ['title','dueAt','classId','notes','priority'];
+    const keys = ['title', 'dueAt', 'classId', 'notes', 'priority', 'scope', 'studentId'];
     for (const k of keys) if (k in req.body) update[k] = req.body[k];
-
+    if (update.scope === 'INDIVIDUAL' && update.studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, update.studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     const doc = await Assignment.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     return res.status(204).send();
@@ -344,7 +447,6 @@ app.put('/api/teacher/assignments/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/teacher/assignments/:id
 app.delete('/api/teacher/assignments/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -358,17 +460,23 @@ app.delete('/api/teacher/assignments/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher: Notes ========= */
-// POST /api/teacher/notes
 app.post('/api/teacher/notes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const { title, content, subject } = req.body || {};
+    const { title, content, subject, scope, studentId } = req.body || {};
     if (!title) return res.status(400).json({ error: 'Title required' });
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     await Note.create({
       teacherId: req.userId,
       title,
       content: content || null,
       subject: subject || null,
+      scope: scope === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? (studentId || null) : null,
       createdAt: nowIso()
     });
     return res.status(204).send();
@@ -377,26 +485,27 @@ app.post('/api/teacher/notes', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/notes -> [{ id, title }]
 app.get('/api/teacher/notes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const rows = await Note.find({ teacherId: req.userId }, 'title').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map(r => ({ id: r._id.toString(), title: r.title })));
+    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// PUT /api/teacher/notes/:id
 app.put('/api/teacher/notes/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.id;
     const update = {};
-    const keys = ['title','content','subject'];
+    const keys = ['title', 'content', 'subject', 'scope', 'studentId'];
     for (const k of keys) if (k in req.body) update[k] = req.body[k];
-
+    if (update.scope === 'INDIVIDUAL' && update.studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, update.studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     const doc = await Note.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     return res.status(204).send();
@@ -405,7 +514,6 @@ app.put('/api/teacher/notes/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/teacher/notes/:id
 app.delete('/api/teacher/notes/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -419,18 +527,25 @@ app.delete('/api/teacher/notes/:id', authRequired, async (req, res) => {
 });
 
 /* ========= Teacher: Exams ========= */
-// POST /api/teacher/exams
 app.post('/api/teacher/exams', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const { title, whenAt, classId, location, notes } = req.body || {};
+    const { title, whenAt, classId, location, notes, scope, studentId } = req.body || {};
     if (!title || !whenAt) return res.status(400).json({ error: 'Invalid payload' });
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     await Exam.create({
       teacherId: req.userId,
-      title, whenAt,
+      title,
+      whenAt,
       classId: classId || null,
       location: location || null,
       notes: notes || null,
+      scope: scope === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? (studentId || null) : null,
       createdAt: nowIso()
     });
     return res.status(204).send();
@@ -439,26 +554,27 @@ app.post('/api/teacher/exams', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/exams -> [{ id, title, whenAt }]
 app.get('/api/teacher/exams', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const rows = await Exam.find({ teacherId: req.userId }, 'title whenAt').sort({ createdAt: -1 }).lean();
-    return res.json(rows.map(r => ({ id: r._id.toString(), title: r.title, whenAt: r.whenAt })));
+    return res.json(rows.map((r) => ({ id: r._id.toString(), title: r.title, whenAt: r.whenAt })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
 
-// PUT /api/teacher/exams/:id
 app.put('/api/teacher/exams/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.id;
     const update = {};
-    const keys = ['title','whenAt','classId','location','notes'];
+    const keys = ['title', 'whenAt', 'classId', 'location', 'notes', 'scope', 'studentId'];
     for (const k of keys) if (k in req.body) update[k] = req.body[k];
-
+    if (update.scope === 'INDIVIDUAL' && update.studentId) {
+      const ok = await ensureTeacherOwnsStudent(req.userId, update.studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    }
     const doc = await Exam.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
     if (!doc) return res.status(404).json({ error: 'Not found' });
     return res.status(204).send();
@@ -467,7 +583,6 @@ app.put('/api/teacher/exams/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/teacher/exams/:id
 app.delete('/api/teacher/exams/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
@@ -480,14 +595,169 @@ app.delete('/api/teacher/exams/:id', authRequired, async (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    message: "Server is healthy",
-    uptime: process.uptime(),
-  });
+/* ========= Teacher: Results ========= */
+// POST /api/teacher/results
+app.post('/api/teacher/results', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const {
+      studentCode,
+      examTitle,
+      examId,
+      subject,
+      totalMarks,
+      obtainedMarks,
+      remarks,
+      scope,       // ignored for results; always individual
+      studentId
+    } = req.body || {};
+
+    if (!examTitle || totalMarks == null || obtainedMarks == null) {
+      return res.status(400).json({ error: 'Invalid payload' });
+    }
+
+    // Resolve student by code or id
+    let student = null;
+    if (studentId) student = await User.findOne({ _id: studentId, role: 'STUDENT' });
+    if (!student && studentCode) student = await User.findOne({ studentCode: studentCode, role: 'STUDENT' });
+    if (!student) return res.status(400).json({ error: 'Student not specified' });
+
+    const ok = await ensureTeacherOwnsStudent(req.userId, student._id);
+    if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+
+    await Result.create({
+      teacherId: req.userId,
+      studentId: student._id,
+      examId: examId || null,
+      examTitle,
+      subject: subject || null,
+      totalMarks: Number(totalMarks),
+      obtainedMarks: Number(obtainedMarks),
+      remarks: remarks || null,
+      createdAt: nowIso()
+    });
+    return res.status(204).send();
+  } catch (e) {
+    return res.status(500).json({ error: 'Server error' });
+  }
 });
 
+// GET /api/teacher/results
+app.get('/api/teacher/results', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const rows = await Result.find({ teacherId: req.userId }).sort({ createdAt: -1 }).lean();
+    // map with studentCode
+    const studentIds = [...new Set(rows.map((r) => r.studentId?.toString()))].filter(Boolean);
+    const students = await User.find({ _id: { $in: studentIds } }, 'studentCode').lean();
+    const codeMap = new Map(students.map((s) => [s._id.toString(), s.studentCode || '']));
+    return res.json(
+      rows.map((r) => ({
+        id: r._id.toString(),
+        studentName: null, // optional
+        studentCode: codeMap.get(r.studentId?.toString()) || '',
+        examTitle: r.examTitle,
+        subject: r.subject || null,
+        totalMarks: r.totalMarks,
+        obtainedMarks: r.obtainedMarks,
+        remarks: r.remarks || null,
+        createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/teacher/results/:id
+app.put('/api/teacher/results/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const id = req.params.id;
+    const update = {};
+    const keys = ['examTitle', 'examId', 'subject', 'totalMarks', 'obtainedMarks', 'remarks'];
+    for (const k of keys) if (k in req.body) update[k] = req.body[k];
+    const doc = await Result.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
+    if (!doc) return res.status(404).json({ error: 'Not found' });
+    return res.status(204).send();
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/teacher/results/:id', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const id = req.params.id;
+    const del = await Result.deleteOne({ _id: id, teacherId: req.userId });
+    if (!del.deletedCount) return res.status(404).json({ error: 'Not found' });
+    return res.status(204).send();
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ========= Attendance ========= */
+// POST /api/teacher/attendance
+// Body: { classId: string, date: yyyy-MM-dd, marks: [{ studentId, present }] }
+app.post('/api/teacher/attendance', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const { classId, date, marks } = req.body || {};
+    if (!classId || !date || !Array.isArray(marks)) return res.status(400).json({ error: 'Invalid payload' });
+
+    // validate class belongs to teacher
+    const cls = await ClassModel.findOne({ _id: classId, teacherId: req.userId }).lean();
+    if (!cls) return res.status(404).json({ error: 'Class not found' });
+
+    // validate each student link
+    for (const m of marks) {
+      if (!m || !m.studentId) continue;
+      const ok = await ensureTeacherOwnsStudent(req.userId, m.studentId);
+      if (!ok) return res.status(403).json({ error: 'Not linked to student ' + m.studentId });
+    }
+
+    // Upsert per teacher+class+date
+    await Attendance.updateOne(
+      { teacherId: req.userId, classId, date },
+      { $set: { marks, createdAt: nowIso() } },
+      { upsert: true }
+    );
+    return res.status(204).send();
+  } catch (e) {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ========= Teacher analytics per student ========= */
+// GET /api/teacher/analytics/:studentId -> { attended, missed, cancelled, attendanceRate }
+app.get('/api/teacher/analytics/:studentId', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
+    const studentId = req.params.studentId;
+    const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
+    if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+
+    // Aggregate attendance marks for this teacher-student
+    const rows = await Attendance.find({ teacherId: req.userId, 'marks.studentId': studentId }).lean();
+
+    let attended = 0;
+    let missed = 0;
+    for (const r of rows) {
+      const rec = (r.marks || []).find((m) => m.studentId?.toString() === studentId);
+      if (!rec) continue;
+      if (rec.present) attended++;
+      else missed++;
+    }
+    const cancelled = 0; // not tracked separately in current schema
+    const total = attended + missed;
+    const attendanceRate = total > 0 ? attended / total : null;
+
+    return res.json({ attended, missed, cancelled, attendanceRate });
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
 
 /* ========= Health ========= */
 app.get('/health', (_req, res) => res.json({ ok: true }));
