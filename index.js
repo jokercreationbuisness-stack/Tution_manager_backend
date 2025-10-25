@@ -48,7 +48,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'mobile_app_secret_key_2024';
 const PORT = process.env.PORT || 3001;
 
 // ========= MONGODB CONNECTION =========
-// ========= MONGODB CONNECTION =========
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -85,12 +84,13 @@ const UserSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Teacher-Student Link
+// Teacher-Student Link - UPDATED WITH SOFT DELETE
 const TeacherStudentLinkSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true },
   studentId: { type: Types.ObjectId, ref: 'User', required: true },
   isActive: { type: Boolean, default: true },
-  createdAt: { type: Date, default: Date.now }
+  linkedAt: { type: Date, default: Date.now },
+  unlinkedAt: { type: Date }
 });
 TeacherStudentLinkSchema.index({ teacherId: 1, studentId: 1 }, { unique: true });
 
@@ -362,6 +362,343 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     database: 'Connected'
   });
+});
+
+// ============================================
+// TEACHER-STUDENT LINK ENDPOINTS - UPDATED ✅
+// ============================================
+
+// POST /api/teacher/link-student - Link a student using their code
+// SUPPORTS: Multiple teachers linking the same student ✅
+app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { code } = req.body;
+
+    if (!code) {
+      return res.status(400).json({ error: 'Student code is required' });
+    }
+
+    // Find student by code
+    const student = await User.findOne({ 
+      studentCode: code, 
+      role: 'STUDENT', 
+      isActive: true 
+    });
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found with this code' });
+    }
+
+    // Check if THIS teacher already linked THIS student
+    const existingLink = await TeacherStudentLink.findOne({
+      teacherId: req.userId,
+      studentId: student._id,
+      isActive: true
+    });
+
+    if (existingLink) {
+      // Already linked by THIS teacher
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Student is already linked to your account' 
+      });
+    }
+
+    // Check if link existed before but was deactivated
+    const deactivatedLink = await TeacherStudentLink.findOne({
+      teacherId: req.userId,
+      studentId: student._id,
+      isActive: false
+    });
+
+    if (deactivatedLink) {
+      // Reactivate the link
+      deactivatedLink.isActive = true;
+      deactivatedLink.linkedAt = new Date();
+      await deactivatedLink.save();
+    } else {
+      // Create new link - ALLOWS MULTIPLE TEACHERS PER STUDENT ✅
+      await TeacherStudentLink.create({
+        teacherId: req.userId,
+        studentId: student._id,
+        isActive: true,
+        linkedAt: new Date()
+      });
+    }
+
+    // Send notification to student
+    const teacher = await User.findById(req.userId);
+    await createNotification(
+      student._id,
+      'SYSTEM',
+      'New Teacher Connection',
+      `${teacher.name} has linked you as their student`,
+      { teacherId: req.userId }
+    );
+
+    // Count how many teachers this student has
+    const linkCount = await TeacherStudentLink.countDocuments({
+      studentId: student._id,
+      isActive: true
+    });
+
+    console.log(`✅ Teacher ${teacher.email} linked student ${student.email} (Student now has ${linkCount} teachers)`);
+
+    res.status(200).json({ 
+      success: true, 
+      message: `Successfully linked ${student.name}` 
+    });
+  } catch (error) {
+    console.error('Link student error:', error);
+    res.status(500).json({ error: 'Failed to link student' });
+  }
+});
+
+// GET /api/teacher/students - List all students linked to this teacher
+app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+
+    // Get all active links for this teacher
+    const links = await TeacherStudentLink.find({ 
+      teacherId, 
+      isActive: true 
+    }).populate('studentId', 'name email mobile studentCode');
+
+    // Format the response
+    const students = links
+      .filter(link => link.studentId) // Filter out any null references
+      .map(link => ({
+        id: link.studentId._id.toString(),
+        name: link.studentId.name,
+        email: link.studentId.email,
+        mobile: link.studentId.mobile,
+        code: link.studentId.studentCode
+      }));
+
+    res.json({ success: true, students });
+  } catch (error) {
+    console.error('List students error:', error);
+    res.status(500).json({ error: 'Failed to fetch students' });
+  }
+});
+
+// DELETE /api/teacher/students/:id - Unlink a student from this teacher
+app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const studentId = req.params.id;
+    const teacherId = req.userId;
+
+    // Find and deactivate the link (soft delete)
+    const result = await TeacherStudentLink.findOneAndUpdate(
+      { teacherId, studentId, isActive: true },
+      { isActive: false, unlinkedAt: new Date() },
+      { new: true }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: 'Student link not found' });
+    }
+
+    // Notify student
+    const teacher = await User.findById(teacherId);
+    await createNotification(
+      studentId,
+      'SYSTEM',
+      'Teacher Disconnected',
+      `${teacher.name} has removed you from their student list`,
+      { teacherId }
+    );
+
+    console.log(`✅ Teacher ${teacher.email} unlinked student ${studentId}`);
+
+    res.status(204).send(); // No content
+  } catch (error) {
+    console.error('Unlink student error:', error);
+    res.status(500).json({ error: 'Failed to unlink student' });
+  }
+});
+
+// ============================================
+// STUDENT ENDPOINTS - Scoped to Linked Teachers ONLY
+// ============================================
+
+// GET /api/student/classes - Only classes from linked teachers
+app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    
+    // Get all teacher IDs that have linked this student
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, classes: [] });
+    }
+    
+    // Fetch classes from linked teachers only
+    const classes = await ClassModel.find({
+      teacherId: { $in: linkedTeacherIds },
+      isActive: true,
+      $or: [
+        { scope: 'ALL' },
+        { scope: { $exists: false } }, // Legacy classes without scope
+        { scope: 'INDIVIDUAL', studentId: studentId }
+      ]
+    }).lean();
+    
+    const formatted = classes.map(c => ({
+      id: c._id.toString(),
+      subject: c.subject || c.title,
+      dayOfWeek: c.dayOfWeek,
+      startTime: c.startTime,
+      endTime: c.endTime,
+      colorHex: c.colorHex,
+      notes: c.notes,
+      location: c.location
+    }));
+    
+    res.json({ success: true, classes: formatted });
+  } catch (error) {
+    console.error('Student classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch classes' });
+  }
+});
+
+// GET /api/student/assignments - Only assignments from linked teachers
+app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, assignments: [] });
+    }
+    
+    const assignments = await Assignment.find({
+      teacherId: { $in: linkedTeacherIds },
+      $or: [
+        { scope: 'ALL' },
+        { scope: { $exists: false } },
+        { scope: 'INDIVIDUAL', studentId: studentId }
+      ]
+    }).lean();
+    
+    const formatted = assignments.map(a => ({
+      id: a._id.toString(),
+      title: a.title,
+      dueAt: a.dueAt ? a.dueAt.toISOString() : null,
+      classId: a.classId ? a.classId.toString() : null,
+      notes: a.notes,
+      priority: a.priority || 0
+    }));
+    
+    res.json({ success: true, assignments: formatted });
+  } catch (error) {
+    console.error('Student assignments error:', error);
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+// GET /api/student/notes - Only notes from linked teachers
+app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, notes: [] });
+    }
+    
+    const notes = await Note.find({
+      teacherId: { $in: linkedTeacherIds },
+      $or: [
+        { scope: 'ALL' },
+        { scope: { $exists: false } },
+        { scope: 'INDIVIDUAL', studentId: studentId }
+      ]
+    }).lean();
+    
+    const formatted = notes.map(n => ({
+      id: n._id.toString(),
+      title: n.title,
+      content: n.content,
+      subject: n.subject
+    }));
+    
+    res.json({ success: true, notes: formatted });
+  } catch (error) {
+    console.error('Student notes error:', error);
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// GET /api/student/exams - Only exams from linked teachers
+app.get('/api/student/exams', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, exams: [] });
+    }
+    
+    const exams = await Exam.find({
+      teacherId: { $in: linkedTeacherIds },
+      isActive: true,
+      $or: [
+        { scope: 'ALL' },
+        { scope: { $exists: false } },
+        { scope: 'INDIVIDUAL', studentId: studentId }
+      ]
+    }).lean();
+    
+    const formatted = exams.map(e => ({
+      id: e._id.toString(),
+      title: e.title,
+      whenAt: e.whenAt.toISOString(),
+      classId: e.classId ? e.classId.toString() : null,
+      location: e.location,
+      notes: e.notes
+    }));
+    
+    res.json({ success: true, exams: formatted });
+  } catch (error) {
+    console.error('Student exams error:', error);
+    res.status(500).json({ error: 'Failed to fetch exams' });
+  }
+});
+
+// GET /api/student/results - Only results from linked teachers
+app.get('/api/student/results', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, results: [] });
+    }
+    
+    // Results should be specifically for this student
+    const results = await Result.find({
+      teacherId: { $in: linkedTeacherIds },
+      studentId: studentId
+    }).lean();
+    
+    const formatted = results.map(r => ({
+      id: r._id.toString(),
+      examTitle: r.examTitle,
+      subject: r.subject,
+      totalMarks: r.totalMarks,
+      obtainedMarks: r.obtainedMarks,
+      remarks: r.remarks,
+      createdAt: r.createdAt.toISOString()
+    }));
+    
+    res.json({ success: true, results: formatted });
+  } catch (error) {
+    console.error('Student results error:', error);
+    res.status(500).json({ error: 'Failed to fetch results' });
+  }
 });
 
 // ========= AUTH ROUTES =========
@@ -646,7 +983,7 @@ app.get('/api/student/teachers', authRequired, requireRole('STUDENT'), async (re
   }
 });
 
-// GET /api/student/classes - Only classes from linked teachers
+// Enhanced student classes endpoint with teacher info
 app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
@@ -694,7 +1031,7 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
   }
 });
 
-// GET /api/student/assignments - Only assignments from linked teachers
+// Enhanced student assignments endpoint with submission status
 app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
@@ -746,7 +1083,7 @@ app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async 
   }
 });
 
-// GET /api/student/notes - Only notes from linked teachers
+// Enhanced student notes endpoint
 app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
@@ -785,7 +1122,7 @@ app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, 
   }
 });
 
-// GET /api/student/exams - Only exams from linked teachers
+// Enhanced student exams endpoint
 app.get('/api/student/exams', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
@@ -826,7 +1163,7 @@ app.get('/api/student/exams', authRequired, requireRole('STUDENT'), async (req, 
   }
 });
 
-// GET /api/student/results - Only results from linked teachers
+// Enhanced student results endpoint
 app.get('/api/student/results', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
@@ -961,75 +1298,6 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
 
 // ========= TEACHER ROUTES =========
 
-// POST /api/teacher/link-student - Alias for existing endpoint
-app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const { code } = req.body;
-
-    if (!code) {
-      return res.status(400).json({ error: 'Student code is required' });
-    }
-
-    const student = await User.findOne({ studentCode: code, role: 'STUDENT', isActive: true });
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    const existingLink = await TeacherStudentLink.findOne({ teacherId: req.userId, studentId: student._id });
-    if (existingLink) {
-      return res.status(409).json({ error: 'Student is already linked' });
-    }
-
-    await TeacherStudentLink.create({
-      teacherId: req.userId,
-      studentId: student._id
-    });
-
-    const teacher = await User.findById(req.userId);
-    await createNotification(
-      student._id,
-      'SYSTEM',
-      'New Teacher Connection',
-      `You have been linked to ${teacher.name}`,
-      { teacherId: req.userId }
-    );
-
-    res.status(204).send();
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to link student' });
-  }
-});
-
-// DELETE /api/teacher/students/:id - Unlink Student
-app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const studentId = req.params.id;
-    
-    const result = await TeacherStudentLink.findOneAndUpdate(
-      { teacherId: req.userId, studentId },
-      { isActive: false },
-      { new: true }
-    );
-    
-    if (!result) {
-      return res.status(404).json({ error: 'Student link not found' });
-    }
-    
-    // Notify student
-    await createNotification(
-      studentId,
-      'SYSTEM',
-      'Teacher Disconnected',
-      'A teacher has removed you from their student list',
-      { teacherId: req.userId }
-    );
-    
-    res.status(204).send();
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to unlink student' });
-  }
-});
-
 app.get('/api/teacher/dashboard', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const teacherId = req.userId;
@@ -1083,70 +1351,6 @@ app.get('/api/teacher/dashboard', authRequired, requireRole('TEACHER'), async (r
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch teacher dashboard' });
-  }
-});
-
-app.post('/api/teacher/students/link', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const { studentCode } = req.body;
-
-    if (!studentCode) {
-      return res.status(400).json({ error: 'Student code is required' });
-    }
-
-    const student = await User.findOne({ studentCode, role: 'STUDENT', isActive: true });
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    // Check if already linked
-    const existingLink = await TeacherStudentLink.findOne({ teacherId: req.userId, studentId: student._id });
-    if (existingLink) {
-      return res.status(409).json({ error: 'Student is already linked' });
-    }
-
-    await TeacherStudentLink.create({
-      teacherId: req.userId,
-      studentId: student._id
-    });
-
-    // Notify student
-    const teacher = await User.findById(req.userId);
-    await createNotification(
-      student._id,
-      'SYSTEM',
-      'New Teacher Connection',
-      `You have been linked to ${teacher.name}`,
-      { teacherId: req.userId }
-    );
-
-    res.json({ success: true, message: 'Student linked successfully' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to link student' });
-  }
-});
-
-app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })
-      .populate('studentId', 'name email mobile studentCode avatar lastLogin')
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const students = links.map(link => ({
-      id: link.studentId._id.toString(),
-      name: link.studentId.name,
-      email: link.studentId.email,
-      mobile: link.studentId.mobile,
-      studentCode: link.studentId.studentCode,
-      avatar: link.studentId.avatar,
-      lastLogin: link.studentId.lastLogin,
-      linkedAt: link.createdAt
-    }));
-
-    res.json({ success: true, students });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch students' });
   }
 });
 
