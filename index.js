@@ -48,11 +48,23 @@ const JWT_SECRET = process.env.JWT_SECRET || 'mobile_app_secret_key_2024';
 const PORT = process.env.PORT || 3001;
 
 // ========= MONGODB CONNECTION =========
-mongoose.connect(MONGODB_URI)
-.then(() => console.log('✅ MongoDB connected successfully'))
+// ========= MONGODB CONNECTION =========
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => {
+  console.log('✅ MongoDB connected successfully');
+  console.log('🗄️ Database:', mongoose.connection.name);
+})
 .catch(err => {
   console.error('❌ MongoDB connection error:', err);
   process.exit(1);
+});
+
+// This event will fire when the database is ready
+mongoose.connection.on('open', function() {
+  console.log('🎯 Database is ready for operations');
 });
 
 // ========= ENHANCED SCHEMAS =========
