@@ -99,7 +99,7 @@ const ClassSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Assignment Schema
+// Assignment Schema - UPDATED: priority as number
 const AssignmentSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true },
@@ -107,7 +107,7 @@ const AssignmentSchema = new Schema({
   dueAt: { type: Date, required: true },
   classId: { type: String },
   notes: { type: String },
-  priority: { type: String, enum: ['LOW', 'MEDIUM', 'HIGH'], default: 'MEDIUM' },
+  priority: { type: Number, enum: [0, 1, 2], default: 1 }, // 0=LOW, 1=MEDIUM, 2=HIGH
   status: { type: String, enum: ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'OVERDUE'], default: 'PENDING' },
   scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
   studentId: { type: Types.ObjectId, ref: 'User' },
@@ -521,7 +521,94 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   }
 });
 
+// Add this endpoint AFTER the /api/auth/me endpoint (around line 550)
+
+// ========= DELETE ACCOUNT =========
+app.delete('/api/auth/account', authRequired, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const user = await User.findById(userId);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const role = user.role;
+
+    if (role === 'TEACHER') {
+      // Delete teacher-specific data
+      // 1. Remove all teacher-student links
+      await TeacherStudentLink.deleteMany({ teacherId: userId });
+      
+      // 2. Delete all classes created by teacher
+      await ClassModel.deleteMany({ teacherId: userId });
+      
+      // 3. Delete all assignments created by teacher
+      const teacherAssignments = await Assignment.find({ teacherId: userId });
+      const assignmentIds = teacherAssignments.map(a => a._id);
+      await AssignmentSubmission.deleteMany({ assignmentId: { $in: assignmentIds } });
+      await Assignment.deleteMany({ teacherId: userId });
+      
+      // 4. Delete all notes created by teacher
+      await Note.deleteMany({ teacherId: userId });
+      
+      // 5. Delete all exams created by teacher
+      await Exam.deleteMany({ teacherId: userId });
+      
+      // 6. Delete all results created by teacher
+      await Result.deleteMany({ teacherId: userId });
+      
+      // 7. Delete all attendance records
+      await Attendance.deleteMany({ teacherId: userId });
+      
+    } else if (role === 'STUDENT') {
+      // Delete student-specific data
+      // 1. Remove from all teacher-student links
+      await TeacherStudentLink.deleteMany({ studentId: userId });
+      
+      // 2. Delete all assignment submissions by this student
+      await AssignmentSubmission.deleteMany({ studentId: userId });
+      
+      // 3. Delete results for this student
+      await Result.deleteMany({ studentId: userId });
+      
+      // 4. Remove student from attendance records
+      await Attendance.updateMany(
+        {},
+        { $pull: { marks: { studentId: userId } } }
+      );
+    }
+
+    // Delete all notifications for this user
+    await Notification.deleteMany({ userId });
+
+    // Finally, delete the user account
+    await User.findByIdAndDelete(userId);
+
+    // Log the deletion
+    console.log(`✅ Account deleted: ${user.email} (${role})`);
+
+    res.status(204).send(); // No Content - successful deletion
+  } catch (error) {
+    console.error('Account deletion error:', error);
+    res.status(500).json({ error: 'Failed to delete account. Please try again.' });
+  }
+});
 // ========= STUDENT ROUTES =========
+
+// 1. GET /api/student/code - Get Student Code
+app.get('/api/student/code', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('studentCode');
+    if (!user || !user.studentCode) {
+      return res.status(404).json({ error: 'Student code not found' });
+    }
+    res.json({ success: true, code: user.studentCode });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch student code' });
+  }
+});
+
 app.get('/api/student/profile', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('-passwordHash');
@@ -916,6 +1003,76 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
 });
 
 // ========= TEACHER ROUTES =========
+
+// 11. POST /api/teacher/link-student - Alias for existing endpoint
+app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { code } = req.body;
+
+    if (!code) {
+      return res.status(400).json({ error: 'Student code is required' });
+    }
+
+    const student = await User.findOne({ studentCode: code, role: 'STUDENT', isActive: true });
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const existingLink = await TeacherStudentLink.findOne({ teacherId: req.userId, studentId: student._id });
+    if (existingLink) {
+      return res.status(409).json({ error: 'Student is already linked' });
+    }
+
+    await TeacherStudentLink.create({
+      teacherId: req.userId,
+      studentId: student._id
+    });
+
+    const teacher = await User.findById(req.userId);
+    await createNotification(
+      student._id,
+      'SYSTEM',
+      'New Teacher Connection',
+      `You have been linked to ${teacher.name}`,
+      { teacherId: req.userId }
+    );
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to link student' });
+  }
+});
+
+// 2. DELETE /api/teacher/students/:id - Unlink Student
+app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const studentId = req.params.id;
+    
+    const result = await TeacherStudentLink.findOneAndUpdate(
+      { teacherId: req.userId, studentId },
+      { isActive: false },
+      { new: true }
+    );
+    
+    if (!result) {
+      return res.status(404).json({ error: 'Student link not found' });
+    }
+    
+    // Notify student
+    await createNotification(
+      studentId,
+      'SYSTEM',
+      'Teacher Disconnected',
+      'A teacher has removed you from their student list',
+      { teacherId: req.userId }
+    );
+    
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to unlink student' });
+  }
+});
+
 app.get('/api/teacher/dashboard', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const teacherId = req.userId;
@@ -1037,6 +1194,59 @@ app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (re
 });
 
 // ========= CLASS MANAGEMENT =========
+
+// 8. PUT /api/teacher/classes/:id - Update class
+app.put('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const classId = req.params.id;
+    const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
+
+    const existingClass = await ClassModel.findOne({ _id: classId, teacherId: req.userId });
+    if (!existingClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    const updateData = {
+      subject: subject || existingClass.subject,
+      title: title || existingClass.title,
+      dayOfWeek: dayOfWeek || existingClass.dayOfWeek,
+      startTime: startTime || existingClass.startTime,
+      endTime: endTime || existingClass.endTime,
+      colorHex: colorHex || existingClass.colorHex,
+      notes: notes !== undefined ? notes : existingClass.notes,
+      location: location !== undefined ? location : existingClass.location,
+      scope: scope || existingClass.scope,
+      studentId: scope === 'INDIVIDUAL' ? studentId : null
+    };
+
+    await ClassModel.findByIdAndUpdate(classId, updateData);
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update class' });
+  }
+});
+
+// 8. DELETE /api/teacher/classes/:id - Delete class
+app.delete('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const classId = req.params.id;
+
+    const classItem = await ClassModel.findOneAndUpdate(
+      { _id: classId, teacherId: req.userId },
+      { isActive: false },
+      { new: true }
+    );
+
+    if (!classItem) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete class' });
+  }
+});
+
 app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
@@ -1126,6 +1336,81 @@ app.get('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req
 });
 
 // ========= ASSIGNMENT MANAGEMENT =========
+
+// 3. GET /api/teacher/assignments - List Teacher Assignments (Fixed response format)
+app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignments = await Assignment.find({ teacherId: req.userId })
+      .sort({ dueAt: 1 })
+      .lean();
+
+    const formattedAssignments = assignments.map(assignment => ({
+      id: assignment._id.toString(),
+      title: assignment.title,
+      dueAt: assignment.dueAt ? assignment.dueAt.toISOString() : null
+    }));
+
+    res.json({ success: true, assignments: formattedAssignments });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+// 4. PUT /api/teacher/assignments/:id - Update Assignment
+app.put('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignmentId = req.params.id;
+    const { title, description, dueAt, classId, notes, priority, scope, studentId, maxMarks } = req.body;
+
+    const assignment = await Assignment.findOne({ _id: assignmentId, teacherId: req.userId });
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    const updateData = {
+      title: title || assignment.title,
+      description: description !== undefined ? description : assignment.description,
+      dueAt: dueAt ? new Date(dueAt) : assignment.dueAt,
+      classId: classId !== undefined ? classId : assignment.classId,
+      notes: notes !== undefined ? notes : assignment.notes,
+      priority: priority || assignment.priority,
+      scope: scope || assignment.scope,
+      studentId: scope === 'INDIVIDUAL' ? studentId : null,
+      maxMarks: maxMarks !== undefined ? maxMarks : assignment.maxMarks,
+      updatedAt: new Date()
+    };
+
+    await Assignment.findByIdAndUpdate(assignmentId, updateData);
+    
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update assignment' });
+  }
+});
+
+// 5. DELETE /api/teacher/assignments/:id - Delete Assignment
+app.delete('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignmentId = req.params.id;
+
+    const assignment = await Assignment.findOneAndDelete({ 
+      _id: assignmentId, 
+      teacherId: req.userId 
+    });
+
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    // Delete associated submissions
+    await AssignmentSubmission.deleteMany({ assignmentId });
+    
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete assignment' });
+  }
+});
+
 app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { title, description, dueAt, classId, notes, priority, scope, studentId, maxMarks, attachments } = req.body;
@@ -1148,7 +1433,7 @@ app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async
       dueAt: new Date(dueAt),
       classId: classId || null,
       notes: notes || '',
-      priority: priority || 'MEDIUM',
+      priority: priority || 1, // Default to MEDIUM (1)
       scope: scope || 'ALL',
       studentId: scope === 'INDIVIDUAL' ? studentId : null,
       maxMarks: maxMarks || null,
@@ -1263,7 +1548,144 @@ app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER
   }
 });
 
+// ========= NOTE MANAGEMENT =========
+
+// 6. GET /api/teacher/notes - List notes
+app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const notes = await Note.find({ teacherId: req.userId })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const formattedNotes = notes.map(note => ({
+      id: note._id.toString(),
+      title: note.title,
+      content: note.content,
+      subject: note.subject
+    }));
+
+    res.json({ success: true, notes: formattedNotes });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// 6. PUT /api/teacher/notes/:id - Update note
+app.put('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const noteId = req.params.id;
+    const { title, content, subject, scope, studentId } = req.body;
+
+    const note = await Note.findOne({ _id: noteId, teacherId: req.userId });
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    const updateData = {
+      title: title || note.title,
+      content: content !== undefined ? content : note.content,
+      subject: subject !== undefined ? subject : note.subject,
+      scope: scope || note.scope,
+      studentId: scope === 'INDIVIDUAL' ? studentId : null,
+      updatedAt: new Date()
+    };
+
+    await Note.findByIdAndUpdate(noteId, updateData);
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update note' });
+  }
+});
+
+// 6. DELETE /api/teacher/notes/:id - Delete note
+app.delete('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const noteId = req.params.id;
+
+    const note = await Note.findOneAndDelete({ _id: noteId, teacherId: req.userId });
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete note' });
+  }
+});
+
 // ========= EXAM MANAGEMENT =========
+
+// 7. GET /api/teacher/exams - List exams
+app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const exams = await Exam.find({ teacherId: req.userId, isActive: true })
+      .sort({ whenAt: 1 })
+      .lean();
+
+    const formattedExams = exams.map(exam => ({
+      id: exam._id.toString(),
+      title: exam.title,
+      whenAt: exam.whenAt.toISOString()
+    }));
+
+    res.json({ success: true, exams: formattedExams });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch exams' });
+  }
+});
+
+// 7. PUT /api/teacher/exams/:id - Update exam
+app.put('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const examId = req.params.id;
+    const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, studentId } = req.body;
+
+    const exam = await Exam.findOne({ _id: examId, teacherId: req.userId });
+    if (!exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+
+    const updateData = {
+      title: title || exam.title,
+      description: description !== undefined ? description : exam.description,
+      whenAt: whenAt ? new Date(whenAt) : exam.whenAt,
+      classId: classId !== undefined ? classId : exam.classId,
+      location: location !== undefined ? location : exam.location,
+      notes: notes !== undefined ? notes : exam.notes,
+      maxMarks: maxMarks || exam.maxMarks,
+      duration: duration || exam.duration,
+      scope: scope || exam.scope,
+      studentId: scope === 'INDIVIDUAL' ? studentId : null
+    };
+
+    await Exam.findByIdAndUpdate(examId, updateData);
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update exam' });
+  }
+});
+
+// 7. DELETE /api/teacher/exams/:id - Delete exam
+app.delete('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const examId = req.params.id;
+
+    const exam = await Exam.findOneAndUpdate(
+      { _id: examId, teacherId: req.userId },
+      { isActive: false },
+      { new: true }
+    );
+
+    if (!exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete exam' });
+  }
+});
+
 app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, studentId } = req.body;
@@ -1322,6 +1744,81 @@ app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req,
 });
 
 // ========= RESULT MANAGEMENT =========
+
+// 9. GET /api/teacher/results - List results
+app.get('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const results = await Result.find({ teacherId: req.userId })
+      .populate('studentId', 'name studentCode')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const formattedResults = results.map(result => ({
+      id: result._id.toString(),
+      studentName: result.studentId?.name,
+      studentCode: result.studentId?.studentCode,
+      examTitle: result.examTitle,
+      subject: result.subject,
+      totalMarks: result.totalMarks,
+      obtainedMarks: result.obtainedMarks,
+      remarks: result.remarks,
+      createdAt: result.createdAt.toISOString()
+    }));
+
+    res.json({ success: true, results: formattedResults });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch results' });
+  }
+});
+
+// 9. PUT /api/teacher/results/:id - Update result
+app.put('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const resultId = req.params.id;
+    const { examTitle, subject, totalMarks, obtainedMarks, remarks } = req.body;
+
+    const result = await Result.findOne({ _id: resultId, teacherId: req.userId });
+    if (!result) {
+      return res.status(404).json({ error: 'Result not found' });
+    }
+
+    const updateData = {
+      examTitle: examTitle || result.examTitle,
+      subject: subject || result.subject,
+      totalMarks: totalMarks !== undefined ? totalMarks : result.totalMarks,
+      obtainedMarks: obtainedMarks !== undefined ? obtainedMarks : result.obtainedMarks,
+      remarks: remarks !== undefined ? remarks : result.remarks
+    };
+
+    if (updateData.totalMarks && updateData.obtainedMarks) {
+      const percentage = (updateData.obtainedMarks / updateData.totalMarks) * 100;
+      updateData.percentage = Math.round(percentage * 100) / 100;
+      updateData.grade = calculateGrade(percentage);
+    }
+
+    await Result.findByIdAndUpdate(resultId, updateData);
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update result' });
+  }
+});
+
+// 9. DELETE /api/teacher/results/:id - Delete result
+app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const resultId = req.params.id;
+
+    const result = await Result.findOneAndDelete({ _id: resultId, teacherId: req.userId });
+    if (!result) {
+      return res.status(404).json({ error: 'Result not found' });
+    }
+
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete result' });
+  }
+});
+
 app.post('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { studentId, examTitle, examId, subject, totalMarks, obtainedMarks, remarks } = req.body;
@@ -1402,6 +1899,91 @@ app.post('/api/teacher/attendance', authRequired, requireRole('TEACHER'), async 
     res.json({ success: true, message: 'Attendance recorded successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to record attendance' });
+  }
+});
+
+// ========= ANALYTICS ENDPOINTS =========
+
+// 10. GET /api/teacher/analytics/overview - Teacher dashboard overview
+app.get('/api/teacher/analytics/overview', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+
+    const studentCount = await TeacherStudentLink.countDocuments({ teacherId, isActive: true });
+    const classCount = await ClassModel.countDocuments({ teacherId, isActive: true });
+    
+    // Pending assignments (not yet graded submissions)
+    const assignments = await Assignment.find({ teacherId }).select('_id');
+    const assignmentIds = assignments.map(a => a._id);
+    const pendingAssignments = await AssignmentSubmission.countDocuments({
+      assignmentId: { $in: assignmentIds },
+      status: { $in: ['SUBMITTED', 'LATE'] }
+    });
+
+    // Upcoming exams (next 30 days)
+    const now = new Date();
+    const next30Days = new Date();
+    next30Days.setDate(next30Days.getDate() + 30);
+    const upcomingExams = await Exam.countDocuments({
+      teacherId,
+      whenAt: { $gte: now, $lte: next30Days },
+      isActive: true
+    });
+
+    res.json({
+      success: true,
+      studentCount,
+      classCount,
+      pendingAssignments,
+      upcomingExams
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch analytics overview' });
+  }
+});
+
+// 10. GET /api/teacher/analytics/:studentId - Per-student analytics
+app.get('/api/teacher/analytics/:studentId', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const studentId = req.params.studentId;
+    const teacherId = req.userId;
+
+    // Verify student is linked
+    const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
+    if (!isLinked) {
+      return res.status(403).json({ error: 'Not authorized to view this student analytics' });
+    }
+
+    // Get attendance records for this student
+    const attendanceRecords = await Attendance.find({ teacherId }).lean();
+    
+    let attended = 0;
+    let missed = 0;
+    let cancelled = 0;
+
+    attendanceRecords.forEach(record => {
+      const studentMark = record.marks.find(m => m.studentId.toString() === studentId);
+      if (studentMark) {
+        if (studentMark.present) {
+          attended++;
+        } else {
+          missed++;
+        }
+      }
+    });
+
+    const total = attended + missed;
+    const attendanceRate = total > 0 ? (attended / total) * 100 : null;
+
+    res.json({
+      success: true,
+      attended,
+      missed,
+      cancelled,
+      attendanceRate: attendanceRate ? Math.round(attendanceRate * 100) / 100 : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch student analytics' });
   }
 });
 
