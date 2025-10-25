@@ -20,10 +20,7 @@ mongoose.set('strictQuery', true);
 mongoose
   .connect(MONGODB_URI, { dbName: DB_NAME })
   .then(() => console.log('Mongo connected'))
-  .catch((err) => {
-    console.error('Mongo connect error', err);
-    process.exit(1);
-  });
+  .catch((err) => { console.error('Mongo connect error', err); process.exit(1); });
 
 /* ========= Schemas & Models ========= */
 const { Schema, Types } = mongoose;
@@ -132,14 +129,10 @@ AttendanceSchema.index({ teacherId: 1, classId: 1, date: 1 }, { unique: true });
 const Attendance = mongoose.model('Attendance', AttendanceSchema);
 
 /* ========= Helpers ========= */
-function nowIso() {
-  return new Date().toISOString();
-}
-
+function nowIso() { return new Date().toISOString(); }
 function signToken(user) {
   return jwt.sign({ sub: user._id.toString(), role: user.role, name: user.name }, JWT_SECRET, { expiresIn: '30d' });
 }
-
 function authRequired(req, res, next) {
   const auth = req.headers.authorization || '';
   const [bearer, token] = auth.split(' ');
@@ -149,18 +142,14 @@ function authRequired(req, res, next) {
     req.userId = payload.sub;
     req.role = payload.role;
     next();
-  } catch {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  } catch { return res.status(401).json({ error: 'Unauthorized' }); }
 }
-
 function generateStudentCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 6; i++) code += alphabet[Math.floor(Math.random() * alphabet.length)];
   return code;
 }
-
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
 function defaultEndTime(startHHmm) {
   if (!startHHmm || !/^\d{2}:\d{2}$/.test(startHHmm)) return startHHmm || '00:00';
@@ -168,7 +157,6 @@ function defaultEndTime(startHHmm) {
   const endH = (hh + 1) % 24;
   return pad2(endH) + ':' + pad2(mm);
 }
-
 async function ensureTeacherOwnsStudent(teacherId, studentId) {
   const link = await TeacherStudentLink.findOne({ teacherId, studentId }).lean();
   return !!link;
@@ -196,7 +184,7 @@ app.post('/api/auth/signup', async (req, res) => {
     });
     const token = signToken(user);
     return res.json({ token, userId: user._id.toString() });
-  } catch (e) {
+  } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
@@ -237,6 +225,148 @@ app.get('/api/student/code', authRequired, async (req, res) => {
       return res.json({ code });
     }
     return res.json({ code: user.studentCode });
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+/* ========= Student: Fetch Data (needed by student dashboard) ========= */
+// GET /api/student/teachers
+app.get('/api/student/teachers', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const links = await TeacherStudentLink.find({ studentId: req.userId })
+      .populate('teacherId', 'name email mobile')
+      .lean();
+    return res.json(
+      links.map((l) => ({
+        id: l.teacherId._id.toString(),
+        name: l.teacherId.name,
+        email: l.teacherId.email,
+        mobile: l.teacherId.mobile || null
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/student/classes
+app.get('/api/student/classes', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
+    const teacherIds = links.map((l) => l.teacherId);
+    const classes = await ClassModel.find({
+      teacherId: { $in: teacherIds },
+      $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
+    }).sort({ dayOfWeek: 1, startTime: 1 }).lean();
+    return res.json(
+      classes.map((c) => ({
+        id: c._id.toString(),
+        subject: c.subject,
+        dayOfWeek: c.dayOfWeek,
+        startTime: c.startTime,
+        endTime: c.endTime,
+        colorHex: c.colorHex || null,
+        notes: c.notes || null,
+        location: c.location || null
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/student/assignments
+app.get('/api/student/assignments', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
+    const teacherIds = links.map((l) => l.teacherId);
+    const assignments = await Assignment.find({
+      teacherId: { $in: teacherIds },
+      $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
+    }).sort({ dueAt: 1, createdAt: -1 }).lean();
+    return res.json(
+      assignments.map((a) => ({
+        id: a._id.toString(),
+        title: a.title,
+        dueAt: a.dueAt || null,
+        classId: a.classId || null,
+        notes: a.notes || null,
+        priority: a.priority || 0
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/student/notes
+app.get('/api/student/notes', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
+    const teacherIds = links.map((l) => l.teacherId);
+    const notes = await Note.find({
+      teacherId: { $in: teacherIds },
+      $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
+    }).sort({ createdAt: -1 }).lean();
+    return res.json(
+      notes.map((n) => ({
+        id: n._id.toString(),
+        title: n.title,
+        content: n.content || null,
+        subject: n.subject || null
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/student/exams
+app.get('/api/student/exams', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const links = await TeacherStudentLink.find({ studentId: req.userId }).lean();
+    const teacherIds = links.map((l) => l.teacherId);
+    const exams = await Exam.find({
+      teacherId: { $in: teacherIds },
+      $or: [{ scope: 'ALL' }, { scope: 'INDIVIDUAL', studentId: req.userId }]
+    }).sort({ whenAt: 1 }).lean();
+    return res.json(
+      exams.map((e) => ({
+        id: e._id.toString(),
+        title: e.title,
+        whenAt: e.whenAt,
+        classId: e.classId || null,
+        location: e.location || null,
+        notes: e.notes || null
+      }))
+    );
+  } catch {
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/student/results
+app.get('/api/student/results', authRequired, async (req, res) => {
+  try {
+    if (req.role !== 'STUDENT') return res.status(403).json({ error: 'Forbidden' });
+    const results = await Result.find({ studentId: req.userId }).sort({ createdAt: -1 }).lean();
+    return res.json(
+      results.map((r) => ({
+        id: r._id.toString(),
+        examTitle: r.examTitle,
+        subject: r.subject || null,
+        totalMarks: r.totalMarks,
+        obtainedMarks: r.obtainedMarks,
+        remarks: r.remarks || null,
+        createdAt: r.createdAt?.toISOString?.() || new Date(r.createdAt).toISOString()
+      }))
+    );
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -302,17 +432,24 @@ app.delete('/api/teacher/students/:id', authRequired, async (req, res) => {
 app.post('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    let { subject, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body || {};
+    let { subject, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId, studentCode } = req.body || {};
     if (!subject || !dayOfWeek || !startTime) return res.status(400).json({ error: 'Invalid payload' });
     if (!endTime) endTime = defaultEndTime(startTime);
 
-    // If INDIVIDUAL, optionally validate link
-    let student = null;
-    if (scope === 'INDIVIDUAL' && studentId) {
-      student = await User.findOne({ _id: studentId, role: 'STUDENT' }).lean();
-      if (!student) return res.status(404).json({ error: 'Student not found' });
-      const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    // Resolve student by id or code if INDIVIDUAL
+    let linkedStudentId = null;
+    if (scope === 'INDIVIDUAL') {
+      if (!studentId && studentCode) {
+        const s = await User.findOne({ studentCode, role: 'STUDENT' }).lean();
+        if (!s) return res.status(404).json({ error: 'Student not found' });
+        linkedStudentId = s._id;
+      } else if (studentId) {
+        linkedStudentId = studentId;
+      }
+      if (linkedStudentId) {
+        const ok = await ensureTeacherOwnsStudent(req.userId, linkedStudentId);
+        if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+      }
     }
 
     await ClassModel.create({
@@ -325,7 +462,7 @@ app.post('/api/teacher/classes', authRequired, async (req, res) => {
       notes: notes || null,
       location: location || null,
       scope: scope === 'INDIVIDUAL' ? 'INDIVIDUAL' : 'ALL',
-      studentId: student ? student._id : null,
+      studentId: linkedStudentId || null,
       createdAt: nowIso()
     });
     return res.status(204).send();
@@ -334,20 +471,34 @@ app.post('/api/teacher/classes', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/teacher/classes -> [{ id, subject, dayOfWeek, startTime, endTime }]
+// GET /api/teacher/classes
 app.get('/api/teacher/classes', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
-    const rows = await ClassModel.find({ teacherId: req.userId }, 'subject dayOfWeek startTime endTime').sort({ createdAt: -1 }).lean();
-    return res.json(
-      rows.map((r) => ({
-        id: r._id.toString(),
-        subject: r.subject,
-        dayOfWeek: r.dayOfWeek,
-        startTime: r.startTime,
-        endTime: r.endTime
-      }))
-    );
+    const rows = await ClassModel.find({ teacherId: req.userId })
+      .sort({ dayOfWeek: 1, startTime: 1 }).lean();
+
+    // populate student name for individual classes
+    const individual = rows.filter(r => r.scope === 'INDIVIDUAL' && r.studentId);
+    const studentIds = [...new Set(individual.map(r => r.studentId.toString()))];
+    const students = studentIds.length
+      ? await User.find({ _id: { $in: studentIds } }, 'name').lean()
+      : [];
+    const nameMap = new Map(students.map(s => [s._id.toString(), s.name]));
+
+    return res.json(rows.map(r => ({
+      id: r._id.toString(),
+      subject: r.subject,
+      dayOfWeek: r.dayOfWeek,
+      startTime: r.startTime,
+      endTime: r.endTime,
+      colorHex: r.colorHex || null,
+      notes: r.notes || null,
+      location: r.location || null,
+      scope: r.scope || 'ALL',
+      studentId: r.studentId ? r.studentId.toString() : null,
+      studentName: r.studentId ? (nameMap.get(r.studentId.toString()) || null) : null
+    })));
   } catch {
     return res.status(500).json({ error: 'Server error' });
   }
@@ -358,15 +509,30 @@ app.put('/api/teacher/classes/:id', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const id = req.params.id;
+    const body = req.body || {};
     const update = {};
-    const keys = ['subject', 'dayOfWeek', 'startTime', 'endTime', 'colorHex', 'notes', 'location', 'scope', 'studentId'];
-    for (const k of keys) if (k in req.body) update[k] = req.body[k];
+    const keys = ['subject', 'dayOfWeek', 'startTime', 'endTime', 'colorHex', 'notes', 'location', 'scope'];
+    for (const k of keys) if (k in body) update[k] = body[k];
     if (update.startTime && !update.endTime) update.endTime = defaultEndTime(update.startTime);
 
-    // If making INDIVIDUAL link ensure ownership
-    if (update.scope === 'INDIVIDUAL' && update.studentId) {
-      const ok = await ensureTeacherOwnsStudent(req.userId, update.studentId);
-      if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+    // Handle student link updates via studentId or studentCode
+    if (('scope' in body && body.scope === 'ALL')) {
+      update.studentId = null;
+    }
+    let desiredStudentId = null;
+    if (body.scope === 'INDIVIDUAL') {
+      if (body.studentId) desiredStudentId = body.studentId;
+      else if (body.studentCode) {
+        const s = await User.findOne({ studentCode: body.studentCode, role: 'STUDENT' }).lean();
+        if (!s) return res.status(404).json({ error: 'Student not found' });
+        desiredStudentId = s._id.toString();
+      }
+      if (desiredStudentId) {
+        const ok = await ensureTeacherOwnsStudent(req.userId, desiredStudentId);
+        if (!ok) return res.status(403).json({ error: 'Not linked to student' });
+        update.studentId = desiredStudentId;
+        update.scope = 'INDIVIDUAL';
+      }
     }
 
     const doc = await ClassModel.findOneAndUpdate({ _id: id, teacherId: req.userId }, update, { new: false });
@@ -637,7 +803,7 @@ app.post('/api/teacher/results', authRequired, async (req, res) => {
       createdAt: nowIso()
     });
     return res.status(204).send();
-  } catch (e) {
+  } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
@@ -647,14 +813,14 @@ app.get('/api/teacher/results', authRequired, async (req, res) => {
   try {
     if (req.role !== 'TEACHER') return res.status(403).json({ error: 'Forbidden' });
     const rows = await Result.find({ teacherId: req.userId }).sort({ createdAt: -1 }).lean();
-    // map with studentCode
     const studentIds = [...new Set(rows.map((r) => r.studentId?.toString()))].filter(Boolean);
-    const students = await User.find({ _id: { $in: studentIds } }, 'studentCode').lean();
+    const students = await User.find({ _id: { $in: studentIds } }, 'studentCode name').lean();
     const codeMap = new Map(students.map((s) => [s._id.toString(), s.studentCode || '']));
+    const nameMap = new Map(students.map((s) => [s._id.toString(), s.name || null]));
     return res.json(
       rows.map((r) => ({
         id: r._id.toString(),
-        studentName: null, // optional
+        studentName: nameMap.get(r.studentId?.toString()) || null,
         studentCode: codeMap.get(r.studentId?.toString()) || '',
         examTitle: r.examTitle,
         subject: r.subject || null,
@@ -724,7 +890,7 @@ app.post('/api/teacher/attendance', authRequired, async (req, res) => {
       { upsert: true }
     );
     return res.status(204).send();
-  } catch (e) {
+  } catch {
     return res.status(500).json({ error: 'Server error' });
   }
 });
@@ -738,18 +904,14 @@ app.get('/api/teacher/analytics/:studentId', authRequired, async (req, res) => {
     const ok = await ensureTeacherOwnsStudent(req.userId, studentId);
     if (!ok) return res.status(403).json({ error: 'Not linked to student' });
 
-    // Aggregate attendance marks for this teacher-student
     const rows = await Attendance.find({ teacherId: req.userId, 'marks.studentId': studentId }).lean();
-
-    let attended = 0;
-    let missed = 0;
+    let attended = 0, missed = 0;
     for (const r of rows) {
       const rec = (r.marks || []).find((m) => m.studentId?.toString() === studentId);
       if (!rec) continue;
-      if (rec.present) attended++;
-      else missed++;
+      if (rec.present) attended++; else missed++;
     }
-    const cancelled = 0; // not tracked separately in current schema
+    const cancelled = 0;
     const total = attended + missed;
     const attendanceRate = total > 0 ? attended / total : null;
 
