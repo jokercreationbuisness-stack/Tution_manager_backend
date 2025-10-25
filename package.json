@@ -2,11 +2,11 @@
   "name": "tuition-manager-backend",
   "version": "1.0.0",
   "description": "Backend for Tuition Manager",
-  "main": "server.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "NODE_ENV=development nodemon server.js"
+    "start": "node index.js",
+    "dev": "NODE_ENV=development nodemon index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
