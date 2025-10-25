@@ -27,7 +27,7 @@ app.set('trust proxy', 1);
 app.use(helmet());
 app.use(mongoSanitize());
 app.use(cors({
-  origin: "*", // Allow all origins for mobile apps
+  origin: "*",
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -38,7 +38,7 @@ const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   message: { error: 'Too many requests from this IP' },
-  trustProxy: 1 // Fix for Render.com proxy
+  trustProxy: 1
 });
 app.use('/api/', limiter);
 
@@ -47,7 +47,7 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/tuitio
 const JWT_SECRET = process.env.JWT_SECRET || 'mobile_app_secret_key_2024';
 const PORT = process.env.PORT || 3001;
 
-// ========= FIX: Updated MongoDB connection =========
+// ========= MONGODB CONNECTION =========
 mongoose.connect(MONGODB_URI)
 .then(() => console.log('✅ MongoDB connected successfully'))
 .catch(err => {
@@ -99,7 +99,7 @@ const ClassSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Assignment Schema - UPDATED: priority as number
+// Assignment Schema
 const AssignmentSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true },
@@ -261,6 +261,15 @@ const ensureTeacherOwnsStudent = async (teacherId, studentId) => {
   return !!link;
 };
 
+// Helper function to get linked teacher IDs for a student
+const getLinkedTeacherIds = async (studentId) => {
+  const links = await TeacherStudentLink.find({ 
+    studentId, 
+    isActive: true 
+  }).select('teacherId');
+  return links.map(link => link.teacherId);
+};
+
 const createNotification = async (userId, type, title, message, data = {}) => {
   try {
     const notification = await Notification.create({
@@ -329,13 +338,7 @@ app.get('/', (req, res) => {
     message: 'Tuition Manager Backend API',
     status: 'Running',
     version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      auth: '/api/auth/*',
-      student: '/api/student/*',
-      teacher: '/api/teacher/*',
-      notifications: '/api/notifications/*'
-    }
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -434,13 +437,8 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // FIX: Better input validation
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
-    }
-
-    if (typeof password !== 'string') {
-      return res.status(400).json({ error: 'Invalid password format' });
     }
 
     const user = await User.findOne({ email: email.toLowerCase().trim() });
@@ -448,7 +446,6 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    // FIX: Better password comparison
     const validPassword = bcrypt.compareSync(password, user.passwordHash);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -521,8 +518,6 @@ app.get('/api/auth/me', authRequired, async (req, res) => {
   }
 });
 
-// Add this endpoint AFTER the /api/auth/me endpoint (around line 550)
-
 // ========= DELETE ACCOUNT =========
 app.delete('/api/auth/account', authRequired, async (req, res) => {
   try {
@@ -594,7 +589,8 @@ app.delete('/api/auth/account', authRequired, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete account. Please try again.' });
   }
 });
-// ========= STUDENT ROUTES =========
+
+// ========= STUDENT ROUTES - SCOPED TO LINKED TEACHERS ONLY =========
 
 // 1. GET /api/student/code - Get Student Code
 app.get('/api/student/code', authRequired, requireRole('STUDENT'), async (req, res) => {
@@ -638,81 +634,81 @@ app.get('/api/student/teachers', authRequired, requireRole('STUDENT'), async (re
   }
 });
 
+// GET /api/student/classes - Only classes from linked teachers
 app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const { page = 1, limit = 50 } = req.query;
-    const skip = (page - 1) * limit;
-
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
-    const teacherIds = links.map(link => link.teacherId);
-
+    const studentId = req.userId;
+    
+    // Get all teacher IDs that have linked this student
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      // Student not linked to any teacher yet
+      return res.json({ success: true, classes: [] });
+    }
+    
+    // Fetch classes from linked teachers only
+    // Classes with scope="ALL" or scope="INDIVIDUAL" where studentId matches
     const classes = await ClassModel.find({
-      teacherId: { $in: teacherIds },
+      teacherId: { $in: linkedTeacherIds },
       isActive: true,
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
     .populate('teacherId', 'name')
     .sort({ dayOfWeek: 1, startTime: 1 })
-    .skip(skip)
-    .limit(parseInt(limit))
     .lean();
-
-    const formattedClasses = classes.map(cls => ({
-      id: cls._id.toString(),
-      subject: cls.subject,
-      title: cls.title,
-      dayOfWeek: cls.dayOfWeek,
-      startTime: cls.startTime,
-      endTime: cls.endTime,
-      colorHex: cls.colorHex,
-      notes: cls.notes,
-      location: cls.location,
-      teacherName: cls.teacherId.name,
-      scope: cls.scope
+    
+    const formatted = classes.map(c => ({
+      id: c._id.toString(),
+      subject: c.subject || c.title,
+      title: c.title,
+      dayOfWeek: c.dayOfWeek,
+      startTime: c.startTime,
+      endTime: c.endTime,
+      colorHex: c.colorHex,
+      notes: c.notes,
+      location: c.location,
+      teacherName: c.teacherId?.name,
+      scope: c.scope
     }));
-
-    res.json({ success: true, classes: formattedClasses });
+    
+    res.json({ success: true, classes: formatted });
   } catch (error) {
+    console.error('Student classes error:', error);
     res.status(500).json({ error: 'Failed to fetch classes' });
   }
 });
 
+// GET /api/student/assignments - Only assignments from linked teachers
 app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const { page = 1, limit = 20, status } = req.query;
-    const skip = (page - 1) * limit;
-
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
-    const teacherIds = links.map(link => link.teacherId);
-
-    let query = {
-      teacherId: { $in: teacherIds },
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, assignments: [] });
+    }
+    
+    const assignments = await Assignment.find({
+      teacherId: { $in: linkedTeacherIds },
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
-    };
-
-    if (status && status !== 'ALL') {
-      query.status = status;
-    }
-
-    const assignments = await Assignment.find(query)
-      .populate('teacherId', 'name')
-      .sort({ dueAt: 1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
-
+    })
+    .populate('teacherId', 'name')
+    .sort({ dueAt: 1 })
+    .lean();
+    
     // Check submission status for each assignment
     const assignmentsWithStatus = await Promise.all(
       assignments.map(async (assignment) => {
         const submission = await AssignmentSubmission.findOne({
           assignmentId: assignment._id,
-          studentId: req.userId
+          studentId: studentId
         });
 
         return {
@@ -730,215 +726,164 @@ app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async 
         };
       })
     );
-
-    res.json({ 
-      success: true, 
-      assignments: assignmentsWithStatus,
-      pagination: { page: parseInt(page), limit: parseInt(limit) }
-    });
+    
+    res.json({ success: true, assignments: assignmentsWithStatus });
   } catch (error) {
+    console.error('Student assignments error:', error);
     res.status(500).json({ error: 'Failed to fetch assignments' });
   }
 });
 
-app.post('/api/student/assignments/:id/submit', authRequired, requireRole('STUDENT'), async (req, res) => {
-  try {
-    const assignmentId = req.params.id;
-    const { notes, attachments } = req.body;
-
-    const assignment = await Assignment.findById(assignmentId);
-    if (!assignment) {
-      return res.status(404).json({ error: 'Assignment not found' });
-    }
-
-    // Verify student is linked to teacher
-    const isLinked = await ensureTeacherOwnsStudent(assignment.teacherId, req.userId);
-    if (!isLinked) {
-      return res.status(403).json({ error: 'Not authorized to submit this assignment' });
-    }
-
-    const submissionData = {
-      notes: notes || '',
-      attachments: attachments || [],
-      submittedAt: new Date(),
-      status: new Date() > new Date(assignment.dueAt) ? 'LATE' : 'SUBMITTED'
-    };
-
-    const submission = await AssignmentSubmission.findOneAndUpdate(
-      { assignmentId, studentId: req.userId },
-      submissionData,
-      { upsert: true, new: true }
-    );
-
-    // Update assignment submission count
-    await Assignment.findByIdAndUpdate(assignmentId, {
-      $inc: { submissionCount: 1 }
-    });
-
-    // Notify teacher
-    const student = await User.findById(req.userId);
-    await createNotification(
-      assignment.teacherId,
-      'ASSIGNMENT',
-      'New Assignment Submission',
-      `${student.name} submitted: ${assignment.title}`,
-      { assignmentId, studentId: req.userId, submissionId: submission._id }
-    );
-
-    res.json({ 
-      success: true, 
-      message: 'Assignment submitted successfully',
-      submissionId: submission._id 
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to submit assignment' });
-  }
-});
-
+// GET /api/student/notes - Only notes from linked teachers
 app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
-
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
-    const teacherIds = links.map(link => link.teacherId);
-
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, notes: [] });
+    }
+    
     const notes = await Note.find({
-      teacherId: { $in: teacherIds },
+      teacherId: { $in: linkedTeacherIds },
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
     .populate('teacherId', 'name')
     .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(parseInt(limit))
     .lean();
-
-    const formattedNotes = notes.map(note => ({
-      id: note._id.toString(),
-      title: note.title,
-      content: note.content,
-      subject: note.subject,
-      category: note.category,
-      teacherName: note.teacherId.name,
-      isPinned: note.isPinned,
-      attachments: note.attachments || [],
-      createdAt: note.createdAt
+    
+    const formatted = notes.map(n => ({
+      id: n._id.toString(),
+      title: n.title,
+      content: n.content,
+      subject: n.subject,
+      teacherName: n.teacherId?.name,
+      isPinned: n.isPinned,
+      attachments: n.attachments || [],
+      createdAt: n.createdAt
     }));
-
-    res.json({ 
-      success: true, 
-      notes: formattedNotes,
-      pagination: { page: parseInt(page), limit: parseInt(limit) }
-    });
+    
+    res.json({ success: true, notes: formatted });
   } catch (error) {
+    console.error('Student notes error:', error);
     res.status(500).json({ error: 'Failed to fetch notes' });
   }
 });
 
+// GET /api/student/exams - Only exams from linked teachers
 app.get('/api/student/exams', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
-
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
-    const teacherIds = links.map(link => link.teacherId);
-
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, exams: [] });
+    }
+    
     const exams = await Exam.find({
-      teacherId: { $in: teacherIds },
+      teacherId: { $in: linkedTeacherIds },
       isActive: true,
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
     .populate('teacherId', 'name')
     .sort({ whenAt: 1 })
-    .skip(skip)
-    .limit(parseInt(limit))
     .lean();
-
-    const formattedExams = exams.map(exam => ({
-      id: exam._id.toString(),
-      title: exam.title,
-      description: exam.description,
-      whenAt: exam.whenAt,
-      location: exam.location,
-      duration: exam.duration,
-      maxMarks: exam.maxMarks,
-      teacherName: exam.teacherId.name,
-      notes: exam.notes
+    
+    const formatted = exams.map(e => ({
+      id: e._id.toString(),
+      title: e.title,
+      description: e.description,
+      whenAt: e.whenAt.toISOString(),
+      location: e.location,
+      duration: e.duration,
+      maxMarks: e.maxMarks,
+      teacherName: e.teacherId.name,
+      notes: e.notes
     }));
-
-    res.json({ 
-      success: true, 
-      exams: formattedExams,
-      pagination: { page: parseInt(page), limit: parseInt(limit) }
-    });
+    
+    res.json({ success: true, exams: formatted });
   } catch (error) {
+    console.error('Student exams error:', error);
     res.status(500).json({ error: 'Failed to fetch exams' });
   }
 });
 
+// GET /api/student/results - Only results from linked teachers
 app.get('/api/student/results', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const { page = 1, limit = 20 } = req.query;
-    const skip = (page - 1) * limit;
-
-    const results = await Result.find({ 
-      studentId: req.userId,
-      published: true 
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, results: [] });
+    }
+    
+    // Results should be specifically for this student
+    const results = await Result.find({
+      teacherId: { $in: linkedTeacherIds },
+      studentId: studentId,
+      published: true
     })
     .populate('teacherId', 'name')
     .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(parseInt(limit))
     .lean();
-
-    const formattedResults = results.map(result => {
-      const percentage = (result.obtainedMarks / result.totalMarks) * 100;
+    
+    const formatted = results.map(r => {
+      const percentage = (r.obtainedMarks / r.totalMarks) * 100;
       return {
-        id: result._id.toString(),
-        examTitle: result.examTitle,
-        subject: result.subject,
-        totalMarks: result.totalMarks,
-        obtainedMarks: result.obtainedMarks,
+        id: r._id.toString(),
+        examTitle: r.examTitle,
+        subject: r.subject,
+        totalMarks: r.totalMarks,
+        obtainedMarks: r.obtainedMarks,
         percentage: Math.round(percentage * 100) / 100,
-        grade: result.grade || calculateGrade(percentage),
-        remarks: result.remarks,
-        teacherName: result.teacherId.name,
-        publishedAt: result.publishedAt,
-        createdAt: result.createdAt
+        grade: r.grade || calculateGrade(percentage),
+        remarks: r.remarks,
+        teacherName: r.teacherId.name,
+        publishedAt: r.publishedAt,
+        createdAt: r.createdAt.toISOString()
       };
     });
-
-    res.json({ 
-      success: true, 
-      results: formattedResults,
-      pagination: { page: parseInt(page), limit: parseInt(limit) }
-    });
+    
+    res.json({ success: true, results: formatted });
   } catch (error) {
+    console.error('Student results error:', error);
     res.status(500).json({ error: 'Failed to fetch results' });
   }
 });
 
 app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
-    const teacherIds = links.map(link => link.teacherId);
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ 
+        success: true, 
+        dashboard: {
+          todayClasses: [],
+          upcomingAssignments: [],
+          recentNotifications: []
+        }
+      });
+    }
 
     // Today's classes
     const today = new Date();
     const dayOfWeek = today.getDay() || 7;
     const todayClasses = await ClassModel.find({
-      teacherId: { $in: teacherIds },
+      teacherId: { $in: linkedTeacherIds },
       dayOfWeek: dayOfWeek,
       isActive: true,
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
     .populate('teacherId', 'name')
@@ -950,11 +895,11 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
     nextWeek.setDate(nextWeek.getDate() + 7);
     
     const upcomingAssignments = await Assignment.find({
-      teacherId: { $in: teacherIds },
+      teacherId: { $in: linkedTeacherIds },
       dueAt: { $gte: today, $lte: nextWeek },
       $or: [
         { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
+        { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
     .populate('teacherId', 'name')
@@ -963,7 +908,7 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
     .lean();
 
     // Recent notifications
-    const recentNotifications = await Notification.find({ userId: req.userId })
+    const recentNotifications = await Notification.find({ userId: studentId })
       .sort({ createdAt: -1 })
       .limit(5)
       .lean();
@@ -1004,7 +949,7 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
 
 // ========= TEACHER ROUTES =========
 
-// 11. POST /api/teacher/link-student - Alias for existing endpoint
+// POST /api/teacher/link-student - Alias for existing endpoint
 app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { code } = req.body;
@@ -1043,7 +988,7 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
   }
 });
 
-// 2. DELETE /api/teacher/students/:id - Unlink Student
+// DELETE /api/teacher/students/:id - Unlink Student
 app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const studentId = req.params.id;
@@ -1195,7 +1140,75 @@ app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (re
 
 // ========= CLASS MANAGEMENT =========
 
-// 8. PUT /api/teacher/classes/:id - Update class
+// POST /api/teacher/classes - Updated with scoping
+app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
+
+    if (!subject || !title || !dayOfWeek || !startTime) {
+      return res.status(400).json({ error: 'Required fields: subject, title, dayOfWeek, startTime' });
+    }
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: 'Not authorized to create class for this student' });
+      }
+    }
+
+    const classData = {
+      teacherId: req.userId,
+      subject,
+      title,
+      dayOfWeek,
+      startTime,
+      endTime: endTime || startTime,
+      colorHex: colorHex || '#3B82F6',
+      notes: notes || '',
+      location: location || '',
+      scope: scope || 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? studentId : null,
+      isActive: true
+    };
+
+    const newClass = await ClassModel.create(classData);
+
+    // Send notification to linked students
+    if (scope === 'ALL') {
+      // Notify all linked students
+      const links = await TeacherStudentLink.find({ 
+        teacherId: req.userId, 
+        isActive: true 
+      });
+      
+      for (const link of links) {
+        await createNotification(
+          link.studentId,
+          'CLASS',
+          'New Class Added',
+          `Your teacher added a new class: ${subject}`,
+          { classId: newClass._id }
+        );
+      }
+    } else if (scope === 'INDIVIDUAL' && studentId) {
+      // Notify specific student
+      await createNotification(
+        studentId,
+        'CLASS',
+        'New Class Added',
+        `Your teacher added a new class: ${subject}`,
+        { classId: newClass._id }
+      );
+    }
+
+    res.status(201).json({ success: true, classId: newClass._id });
+  } catch (error) {
+    console.error('Create class error:', error);
+    res.status(500).json({ error: 'Failed to create class' });
+  }
+});
+
+// PUT /api/teacher/classes/:id - Update class
 app.put('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const classId = req.params.id;
@@ -1226,7 +1239,7 @@ app.put('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async 
   }
 });
 
-// 8. DELETE /api/teacher/classes/:id - Delete class
+// DELETE /api/teacher/classes/:id - Delete class
 app.delete('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const classId = req.params.id;
@@ -1244,65 +1257,6 @@ app.delete('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), asy
     res.status(204).send();
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete class' });
-  }
-});
-
-app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
-
-    if (!subject || !title || !dayOfWeek || !startTime) {
-      return res.status(400).json({ error: 'Required fields: subject, title, dayOfWeek, startTime' });
-    }
-
-    if (scope === 'INDIVIDUAL' && studentId) {
-      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not authorized to create class for this student' });
-      }
-    }
-
-    const classData = {
-      teacherId: req.userId,
-      subject,
-      title,
-      dayOfWeek,
-      startTime,
-      endTime: endTime || startTime,
-      colorHex: colorHex || '#3B82F6',
-      notes: notes || '',
-      location: location || '',
-      scope: scope || 'ALL',
-      studentId: scope === 'INDIVIDUAL' ? studentId : null
-    };
-
-    const newClass = await ClassModel.create(classData);
-
-    // Notify students
-    if (scope === 'ALL') {
-      const students = await TeacherStudentLink.find({ teacherId: req.userId }).populate('studentId');
-      for (const link of students) {
-        await createNotification(
-          link.studentId._id,
-          'CLASS',
-          'New Class Scheduled',
-          `New class: ${title} (${subject})`,
-          { classId: newClass._id }
-        );
-      }
-    } else if (studentId) {
-      await createNotification(
-        studentId,
-        'CLASS',
-        'New Individual Class',
-        `New individual class: ${title} (${subject})`,
-        { classId: newClass._id }
-      );
-    }
-
-    res.status(201).json({ success: true, classId: newClass._id });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to create class' });
   }
 });
 
@@ -1337,7 +1291,7 @@ app.get('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req
 
 // ========= ASSIGNMENT MANAGEMENT =========
 
-// 3. GET /api/teacher/assignments - List Teacher Assignments (Fixed response format)
+// GET /api/teacher/assignments - List Teacher Assignments
 app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const assignments = await Assignment.find({ teacherId: req.userId })
@@ -1356,7 +1310,7 @@ app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async 
   }
 });
 
-// 4. PUT /api/teacher/assignments/:id - Update Assignment
+// PUT /api/teacher/assignments/:id - Update Assignment
 app.put('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const assignmentId = req.params.id;
@@ -1388,7 +1342,7 @@ app.put('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), as
   }
 });
 
-// 5. DELETE /api/teacher/assignments/:id - Delete Assignment
+// DELETE /api/teacher/assignments/:id - Delete Assignment
 app.delete('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const assignmentId = req.params.id;
@@ -1411,6 +1365,7 @@ app.delete('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'),
   }
 });
 
+// POST /api/teacher/assignments - Updated with scoping
 app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { title, description, dueAt, classId, notes, priority, scope, studentId, maxMarks, attachments } = req.body;
@@ -1433,26 +1388,26 @@ app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async
       dueAt: new Date(dueAt),
       classId: classId || null,
       notes: notes || '',
-      priority: priority || 1, // Default to MEDIUM (1)
+      priority: priority || 1,
       scope: scope || 'ALL',
       studentId: scope === 'INDIVIDUAL' ? studentId : null,
       maxMarks: maxMarks || null,
       attachments: attachments || []
     });
 
-    // Notify students
+    // Notify students based on scope
     if (scope === 'ALL') {
-      const students = await TeacherStudentLink.find({ teacherId: req.userId }).populate('studentId');
-      for (const link of students) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      for (const link of links) {
         await createNotification(
-          link.studentId._id,
+          link.studentId,
           'ASSIGNMENT',
           'New Assignment',
           `New assignment: ${title}`,
           { assignmentId: assignment._id }
         );
       }
-    } else if (studentId) {
+    } else if (scope === 'INDIVIDUAL' && studentId) {
       await createNotification(
         studentId,
         'ASSIGNMENT',
@@ -1538,8 +1493,7 @@ app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER
       'ASSIGNMENT',
       'Assignment Graded',
       `Your assignment "${submission.assignmentId.title}" has been graded.`,
-      { assignmentId: submission.assignmentId._id, submissionId: submission._id },
-      'MEDIUM'
+      { assignmentId: submission.assignmentId._id, submissionId: submission._id }
     );
 
     return res.status(204).send();
@@ -1550,7 +1504,7 @@ app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER
 
 // ========= NOTE MANAGEMENT =========
 
-// 6. GET /api/teacher/notes - List notes
+// GET /api/teacher/notes - List notes
 app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const notes = await Note.find({ teacherId: req.userId })
@@ -1570,7 +1524,7 @@ app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, 
   }
 });
 
-// 6. PUT /api/teacher/notes/:id - Update note
+// PUT /api/teacher/notes/:id - Update note
 app.put('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const noteId = req.params.id;
@@ -1597,7 +1551,7 @@ app.put('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (r
   }
 });
 
-// 6. DELETE /api/teacher/notes/:id - Delete note
+// DELETE /api/teacher/notes/:id - Delete note
 app.delete('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const noteId = req.params.id;
@@ -1613,9 +1567,63 @@ app.delete('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async
   }
 });
 
+// POST /api/teacher/notes - Updated with scoping
+app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { title, content, subject, scope, studentId, attachments } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: 'Not authorized to create note for this student' });
+      }
+    }
+
+    const note = await Note.create({
+      teacherId: req.userId,
+      title,
+      content: content || '',
+      subject: subject || '',
+      scope: scope || 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? studentId : null,
+      attachments: attachments || []
+    });
+
+    // Notify students based on scope
+    if (scope === 'ALL') {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      for (const link of links) {
+        await createNotification(
+          link.studentId,
+          'CLASS',
+          'New Note Added',
+          `New note: ${title}`,
+          { noteId: note._id }
+        );
+      }
+    } else if (scope === 'INDIVIDUAL' && studentId) {
+      await createNotification(
+        studentId,
+        'CLASS',
+        'New Note Added',
+        `New note: ${title}`,
+        { noteId: note._id }
+      );
+    }
+
+    res.status(201).json({ success: true, noteId: note._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
 // ========= EXAM MANAGEMENT =========
 
-// 7. GET /api/teacher/exams - List exams
+// GET /api/teacher/exams - List exams
 app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const exams = await Exam.find({ teacherId: req.userId, isActive: true })
@@ -1634,7 +1642,7 @@ app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, 
   }
 });
 
-// 7. PUT /api/teacher/exams/:id - Update exam
+// PUT /api/teacher/exams/:id - Update exam
 app.put('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const examId = req.params.id;
@@ -1665,7 +1673,7 @@ app.put('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (r
   }
 });
 
-// 7. DELETE /api/teacher/exams/:id - Delete exam
+// DELETE /api/teacher/exams/:id - Delete exam
 app.delete('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const examId = req.params.id;
@@ -1686,6 +1694,7 @@ app.delete('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async
   }
 });
 
+// POST /api/teacher/exams - Updated with scoping
 app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, studentId } = req.body;
@@ -1715,19 +1724,19 @@ app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req,
       studentId: scope === 'INDIVIDUAL' ? studentId : null
     });
 
-    // Notify students
+    // Notify students based on scope
     if (scope === 'ALL') {
-      const students = await TeacherStudentLink.find({ teacherId: req.userId }).populate('studentId');
-      for (const link of students) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      for (const link of links) {
         await createNotification(
-          link.studentId._id,
+          link.studentId,
           'EXAM',
           'New Exam Scheduled',
           `New exam: ${title}`,
           { examId: exam._id }
         );
       }
-    } else if (studentId) {
+    } else if (scope === 'INDIVIDUAL' && studentId) {
       await createNotification(
         studentId,
         'EXAM',
@@ -1745,7 +1754,7 @@ app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req,
 
 // ========= RESULT MANAGEMENT =========
 
-// 9. GET /api/teacher/results - List results
+// GET /api/teacher/results - List results
 app.get('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const results = await Result.find({ teacherId: req.userId })
@@ -1771,7 +1780,7 @@ app.get('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req
   }
 });
 
-// 9. PUT /api/teacher/results/:id - Update result
+// PUT /api/teacher/results/:id - Update result
 app.put('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const resultId = req.params.id;
@@ -1803,7 +1812,7 @@ app.put('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), async 
   }
 });
 
-// 9. DELETE /api/teacher/results/:id - Delete result
+// DELETE /api/teacher/results/:id - Delete result
 app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const resultId = req.params.id;
@@ -1819,6 +1828,7 @@ app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), asy
   }
 });
 
+// POST /api/teacher/results - Updated with scoping
 app.post('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { studentId, examTitle, examId, subject, totalMarks, obtainedMarks, remarks } = req.body;
@@ -1904,7 +1914,7 @@ app.post('/api/teacher/attendance', authRequired, requireRole('TEACHER'), async 
 
 // ========= ANALYTICS ENDPOINTS =========
 
-// 10. GET /api/teacher/analytics/overview - Teacher dashboard overview
+// GET /api/teacher/analytics/overview - Teacher dashboard overview
 app.get('/api/teacher/analytics/overview', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const teacherId = req.userId;
@@ -1942,7 +1952,7 @@ app.get('/api/teacher/analytics/overview', authRequired, requireRole('TEACHER'),
   }
 });
 
-// 10. GET /api/teacher/analytics/:studentId - Per-student analytics
+// GET /api/teacher/analytics/:studentId - Per-student analytics
 app.get('/api/teacher/analytics/:studentId', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const studentId = req.params.studentId;
