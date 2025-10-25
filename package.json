@@ -2,7 +2,7 @@
   "name": "tuition-manager-backend",
   "version": "1.0.0",
   "description": "Complete backend for Tuition Manager Mobile App - Student Teacher Management System",
-  "main": "server.js",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
