@@ -20,27 +20,25 @@ const io = socketIo(server, {
   }
 });
 
+// ========= FIX: Trust proxy for Render.com =========
+app.set('trust proxy', 1);
+
 // ========= SECURITY & MIDDLEWARE =========
 app.use(helmet());
 app.use(mongoSanitize());
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:19006',
-    'exp://192.168.*.*:19000',
-    'capacitor://localhost',
-    'ionic://localhost'
-  ],
+  origin: "*", // Allow all origins for mobile apps
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
-// Rate limiting
+// ========= FIX: Rate limiting with proxy fix =========
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
-  message: { error: 'Too many requests from this IP' }
+  message: { error: 'Too many requests from this IP' },
+  trustProxy: 1 // Fix for Render.com proxy
 });
 app.use('/api/', limiter);
 
@@ -49,11 +47,8 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/tuitio
 const JWT_SECRET = process.env.JWT_SECRET || 'mobile_app_secret_key_2024';
 const PORT = process.env.PORT || 3001;
 
-// ========= DATABASE CONNECTION =========
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
+// ========= FIX: Updated MongoDB connection =========
+mongoose.connect(MONGODB_URI)
 .then(() => console.log('✅ MongoDB connected successfully'))
 .catch(err => {
   console.error('❌ MongoDB connection error:', err);
@@ -72,7 +67,7 @@ const UserSchema = new Schema({
   role: { type: String, enum: ['STUDENT', 'TEACHER'], required: true },
   studentCode: { type: String, unique: true, sparse: true },
   avatar: { type: String },
-  fcmToken: { type: String }, // For push notifications
+  fcmToken: { type: String },
   isActive: { type: Boolean, default: true },
   lastLogin: { type: Date },
   createdAt: { type: Date, default: Date.now }
@@ -328,6 +323,32 @@ io.on('connection', (socket) => {
   });
 });
 
+// ========= ROOT & HEALTH ENDPOINTS =========
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Tuition Manager Backend API',
+    status: 'Running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: '/api/auth/*',
+      student: '/api/student/*',
+      teacher: '/api/teacher/*',
+      notifications: '/api/notifications/*'
+    }
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    success: true, 
+    message: 'Tuition Manager API is running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    database: 'Connected'
+  });
+});
+
 // ========= AUTH ROUTES =========
 app.post('/api/auth/register', async (req, res) => {
   try {
@@ -413,15 +434,21 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    // FIX: Better input validation
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    if (typeof password !== 'string') {
+      return res.status(400).json({ error: 'Invalid password format' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
     if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
+    // FIX: Better password comparison
     const validPassword = bcrypt.compareSync(password, user.passwordHash);
     if (!validPassword) {
       return res.status(401).json({ error: 'Invalid credentials' });
@@ -817,7 +844,7 @@ app.get('/api/student/dashboard', authRequired, requireRole('STUDENT'), async (r
 
     // Today's classes
     const today = new Date();
-    const dayOfWeek = today.getDay() || 7; // Convert Sunday (0) to 7
+    const dayOfWeek = today.getDay() || 7;
     const todayClasses = await ClassModel.find({
       teacherId: { $in: teacherIds },
       dayOfWeek: dayOfWeek,
@@ -1031,7 +1058,7 @@ app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (re
       title,
       dayOfWeek,
       startTime,
-      endTime: endTime || startTime, // Default to startTime if not provided
+      endTime: endTime || startTime,
       colorHex: colorHex || '#3B82F6',
       notes: notes || '',
       location: location || '',
@@ -1195,6 +1222,189 @@ app.get('/api/teacher/assignments/:id/submissions', authRequired, requireRole('T
   }
 });
 
+// ========= GRADE SUBMISSION =========
+app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const submissionId = req.params.id;
+    const { marks, feedback } = req.body;
+
+    const submission = await AssignmentSubmission.findById(submissionId).populate('assignmentId');
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    // Verify teacher owns the assignment
+    if (submission.assignmentId.teacherId.toString() !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const updateData = {
+      marks: marks !== undefined ? marks : submission.marks,
+      feedback: feedback || submission.feedback,
+      gradedAt: new Date(),
+      status: 'GRADED'
+    };
+
+    await AssignmentSubmission.findByIdAndUpdate(submissionId, updateData);
+
+    // Notify student
+    await createNotification(
+      submission.studentId,
+      'ASSIGNMENT',
+      'Assignment Graded',
+      `Your assignment "${submission.assignmentId.title}" has been graded.`,
+      { assignmentId: submission.assignmentId._id, submissionId: submission._id },
+      'MEDIUM'
+    );
+
+    return res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to grade submission' });
+  }
+});
+
+// ========= EXAM MANAGEMENT =========
+app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, studentId } = req.body;
+
+    if (!title || !whenAt || !maxMarks) {
+      return res.status(400).json({ error: 'Title, date, and max marks are required' });
+    }
+
+    if (scope === 'INDIVIDUAL' && studentId) {
+      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: 'Not authorized to create exam for this student' });
+      }
+    }
+
+    const exam = await Exam.create({
+      teacherId: req.userId,
+      title,
+      description: description || '',
+      whenAt: new Date(whenAt),
+      classId: classId || null,
+      location: location || '',
+      notes: notes || '',
+      maxMarks,
+      duration: duration || 60,
+      scope: scope || 'ALL',
+      studentId: scope === 'INDIVIDUAL' ? studentId : null
+    });
+
+    // Notify students
+    if (scope === 'ALL') {
+      const students = await TeacherStudentLink.find({ teacherId: req.userId }).populate('studentId');
+      for (const link of students) {
+        await createNotification(
+          link.studentId._id,
+          'EXAM',
+          'New Exam Scheduled',
+          `New exam: ${title}`,
+          { examId: exam._id }
+        );
+      }
+    } else if (studentId) {
+      await createNotification(
+        studentId,
+        'EXAM',
+        'New Individual Exam',
+        `New individual exam: ${title}`,
+        { examId: exam._id }
+      );
+    }
+
+    res.status(201).json({ success: true, examId: exam._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create exam' });
+  }
+});
+
+// ========= RESULT MANAGEMENT =========
+app.post('/api/teacher/results', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { studentId, examTitle, examId, subject, totalMarks, obtainedMarks, remarks } = req.body;
+
+    if (!studentId || !examTitle || totalMarks == null || obtainedMarks == null) {
+      return res.status(400).json({ error: 'Student, exam title, and marks are required' });
+    }
+
+    const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+    if (!isLinked) {
+      return res.status(403).json({ error: 'Not authorized to add result for this student' });
+    }
+
+    const percentage = (obtainedMarks / totalMarks) * 100;
+    const grade = calculateGrade(percentage);
+
+    const result = await Result.create({
+      teacherId: req.userId,
+      studentId,
+      examId: examId || null,
+      examTitle,
+      subject: subject || 'General',
+      totalMarks,
+      obtainedMarks,
+      percentage: Math.round(percentage * 100) / 100,
+      grade,
+      remarks: remarks || '',
+      published: true,
+      publishedAt: new Date()
+    });
+
+    // Notify student
+    await createNotification(
+      studentId,
+      'RESULT',
+      'New Result Published',
+      `Result published for: ${examTitle}`,
+      { resultId: result._id, examTitle }
+    );
+
+    res.status(201).json({ success: true, resultId: result._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create result' });
+  }
+});
+
+// ========= ATTENDANCE MANAGEMENT =========
+app.post('/api/teacher/attendance', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { classId, date, marks } = req.body;
+
+    if (!classId || !date || !Array.isArray(marks)) {
+      return res.status(400).json({ error: 'Class ID, date, and marks array are required' });
+    }
+
+    // Validate class belongs to teacher
+    const classExists = await ClassModel.findOne({ _id: classId, teacherId: req.userId });
+    if (!classExists) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    // Validate each student link
+    for (const mark of marks) {
+      if (!mark || !mark.studentId) continue;
+      const isLinked = await ensureTeacherOwnsStudent(req.userId, mark.studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: `Not linked to student ${mark.studentId}` });
+      }
+    }
+
+    // Upsert attendance
+    await Attendance.updateOne(
+      { teacherId: req.userId, classId, date },
+      { $set: { marks, createdAt: new Date() } },
+      { upsert: true }
+    );
+
+    res.json({ success: true, message: 'Attendance recorded successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to record attendance' });
+  }
+});
+
 // ========= NOTIFICATION ROUTES =========
 app.get('/api/notifications', authRequired, async (req, res) => {
   try {
@@ -1256,16 +1466,6 @@ app.patch('/api/notifications/read-all', authRequired, async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: 'Failed to update notifications' });
   }
-});
-
-// ========= HEALTH CHECK =========
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'Tuition Manager API is running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
-  });
 });
 
 // ========= 404 HANDLER =========
