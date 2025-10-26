@@ -237,6 +237,30 @@ const NotificationSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+// Planner/Task Schema - Add this after the Notification Schema
+const PlannerTaskSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true },
+  description: { type: String },
+  date: { type: Date, required: true },
+  startTime: { type: String }, // "09:00"
+  endTime: { type: String }, // "10:00"
+  type: { type: String, enum: ['STUDY', 'CLASS', 'EXERCISE', 'WORK', 'PERSONAL', 'OTHER'], default: 'STUDY' },
+  location: { type: String },
+  priority: { type: Number, enum: [0, 1, 2], default: 1 }, // 0=LOW, 1=MEDIUM, 2=HIGH
+  completed: { type: Boolean, default: false },
+  completedAt: { type: Date },
+  notifyBefore: { type: Number, default: 30 }, // Minutes before to notify
+  repeatType: { type: String, enum: ['NONE', 'DAILY', 'WEEKLY', 'MONTHLY'], default: 'NONE' },
+  repeatUntil: { type: Date },
+  colorHex: { type: String, default: '#3B82F6' },
+  notes: { type: String },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
+
 // ========= MODELS =========
 const User = mongoose.model('User', UserSchema);
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
@@ -2289,6 +2313,238 @@ app.patch('/api/notifications/read-all', authRequired, async (req, res) => {
     res.json({ success: true, message: 'All notifications marked as read' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to update notifications' });
+  }
+});
+
+// ========= PLANNER/TASK MANAGEMENT =========
+
+// GET /api/planner/tasks - Get all tasks for current user
+app.get('/api/planner/tasks', authRequired, async (req, res) => {
+  try {
+    const { startDate, endDate, type, completed } = req.query;
+    
+    let query = { userId: req.userId };
+    
+    // Filter by date range
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+    
+    // Filter by type
+    if (type && type !== 'ALL') {
+      query.type = type;
+    }
+    
+    // Filter by completion status
+    if (completed !== undefined) {
+      query.completed = completed === 'true';
+    }
+    
+    const tasks = await PlannerTask.find(query)
+      .sort({ date: 1, startTime: 1 })
+      .lean();
+    
+    const formatted = tasks.map(task => ({
+      id: task._id.toString(),
+      title: task.title,
+      description: task.description,
+      date: task.date.toISOString(),
+      startTime: task.startTime,
+      endTime: task.endTime,
+      type: task.type,
+      location: task.location,
+      priority: task.priority,
+      completed: task.completed,
+      completedAt: task.completedAt,
+      notifyBefore: task.notifyBefore,
+      repeatType: task.repeatType,
+      repeatUntil: task.repeatUntil,
+      colorHex: task.colorHex,
+      notes: task.notes,
+      createdAt: task.createdAt.toISOString(),
+      updatedAt: task.updatedAt.toISOString()
+    }));
+    
+    res.json({ success: true, tasks: formatted });
+  } catch (error) {
+    console.error('Get tasks error:', error);
+    res.status(500).json({ error: 'Failed to fetch tasks' });
+  }
+});
+
+// POST /api/planner/tasks - Create new task
+app.post('/api/planner/tasks', authRequired, async (req, res) => {
+  try {
+    const {
+      title, description, date, startTime, endTime, type, location,
+      priority, notifyBefore, repeatType, repeatUntil, colorHex, notes
+    } = req.body;
+    
+    if (!title || !date) {
+      return res.status(400).json({ error: 'Title and date are required' });
+    }
+    
+    const task = await PlannerTask.create({
+      userId: req.userId,
+      title,
+      description: description || '',
+      date: new Date(date),
+      startTime: startTime || null,
+      endTime: endTime || null,
+      type: type || 'STUDY',
+      location: location || '',
+      priority: priority !== undefined ? priority : 1,
+      notifyBefore: notifyBefore !== undefined ? notifyBefore : 30,
+      repeatType: repeatType || 'NONE',
+      repeatUntil: repeatUntil ? new Date(repeatUntil) : null,
+      colorHex: colorHex || '#3B82F6',
+      notes: notes || ''
+    });
+    
+    res.status(201).json({ success: true, taskId: task._id.toString() });
+  } catch (error) {
+    console.error('Create task error:', error);
+    res.status(500).json({ error: 'Failed to create task' });
+  }
+});
+
+// PUT /api/planner/tasks/:id - Update task
+app.put('/api/planner/tasks/:id', authRequired, async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const updates = req.body;
+    
+    const task = await PlannerTask.findOne({ _id: taskId, userId: req.userId });
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    
+    // Update allowed fields
+    const allowedUpdates = [
+      'title', 'description', 'date', 'startTime', 'endTime', 'type',
+      'location', 'priority', 'notifyBefore', 'repeatType', 'repeatUntil',
+      'colorHex', 'notes'
+    ];
+    
+    allowedUpdates.forEach(field => {
+      if (updates[field] !== undefined) {
+        task[field] = updates[field];
+      }
+    });
+    
+    task.updatedAt = new Date();
+    await task.save();
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error('Update task error:', error);
+    res.status(500).json({ error: 'Failed to update task' });
+  }
+});
+
+// PATCH /api/planner/tasks/:id/complete - Toggle completion
+app.patch('/api/planner/tasks/:id/complete', authRequired, async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const { completed } = req.body;
+    
+    const task = await PlannerTask.findOne({ _id: taskId, userId: req.userId });
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    
+    task.completed = completed !== undefined ? completed : !task.completed;
+    task.completedAt = task.completed ? new Date() : null;
+    task.updatedAt = new Date();
+    await task.save();
+    
+    res.json({ success: true, completed: task.completed });
+  } catch (error) {
+    console.error('Toggle completion error:', error);
+    res.status(500).json({ error: 'Failed to update task' });
+  }
+});
+
+// DELETE /api/planner/tasks/:id - Delete task
+app.delete('/api/planner/tasks/:id', authRequired, async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    
+    const task = await PlannerTask.findOneAndDelete({ _id: taskId, userId: req.userId });
+    if (!task) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete task error:', error);
+    res.status(500).json({ error: 'Failed to delete task' });
+  }
+});
+
+// GET /api/planner/stats - Get planner statistics
+app.get('/api/planner/stats', authRequired, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    // Today's tasks
+    const todayTasks = await PlannerTask.countDocuments({
+      userId,
+      date: { $gte: today, $lt: tomorrow }
+    });
+    
+    const todayCompleted = await PlannerTask.countDocuments({
+      userId,
+      date: { $gte: today, $lt: tomorrow },
+      completed: true
+    });
+    
+    // This week's tasks
+    const weekStart = new Date(today);
+    weekStart.setDate(today.getDate() - today.getDay());
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 7);
+    
+    const weekTasks = await PlannerTask.countDocuments({
+      userId,
+      date: { $gte: weekStart, $lt: weekEnd }
+    });
+    
+    const weekCompleted = await PlannerTask.countDocuments({
+      userId,
+      date: { $gte: weekStart, $lt: weekEnd },
+      completed: true
+    });
+    
+    // Overdue tasks
+    const overdue = await PlannerTask.countDocuments({
+      userId,
+      date: { $lt: today },
+      completed: false
+    });
+    
+    res.json({
+      success: true,
+      stats: {
+        todayTotal: todayTasks,
+        todayCompleted,
+        weekTotal: weekTasks,
+        weekCompleted,
+        overdue,
+        todayProgress: todayTasks > 0 ? Math.round((todayCompleted / todayTasks) * 100) : 0,
+        weekProgress: weekTasks > 0 ? Math.round((weekCompleted / weekTasks) * 100) : 0
+      }
+    });
+  } catch (error) {
+    console.error('Get stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch statistics' });
   }
 });
 
