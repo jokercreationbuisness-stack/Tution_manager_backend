@@ -1520,12 +1520,15 @@ app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async 
     const formattedAssignments = assignments.map(assignment => ({
       id: assignment._id.toString(),
       title: assignment.title,
-      dueAt: assignment.dueAt ? assignment.dueAt.toISOString() : null
+      dueAt: assignment.dueAt ? assignment.dueAt.toISOString() : null,
+      description: assignment.description,  // ← Add this
+      notes: assignment.notes,              // ← Add this
+      priority: assignment.priority         // ← Add this
     }));
 
     res.json({ success: true, assignments: formattedAssignments });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch assignments' });
+    res.status(500).json({ success: false, error: 'Failed to fetch assignments' });
   }
 });
 
