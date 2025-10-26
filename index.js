@@ -1848,19 +1848,26 @@ app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req,
 // GET /api/teacher/exams - List exams
 app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
-    const exams = await Exam.find({ teacherId: req.userId, isActive: true })
-      .sort({ whenAt: 1 })
-      .lean();
+    const exams = await Exam.find({ 
+      teacherId: req.userId,
+      isActive: true  // ← Filter out deleted exams
+    })
+    .sort({ whenAt: 1 })
+    .lean();
 
     const formattedExams = exams.map(exam => ({
       id: exam._id.toString(),
       title: exam.title,
-      whenAt: exam.whenAt.toISOString()
+      whenAt: exam.whenAt.toISOString(),
+      description: exam.description,  // ← Add this
+      location: exam.location,        // ← Add this
+      maxMarks: exam.maxMarks,        // ← Add this
+      duration: exam.duration         // ← Add this
     }));
 
     res.json({ success: true, exams: formattedExams });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch exams' });
+    res.status(500).json({ success: false, error: 'Failed to fetch exams' });
   }
 });
 
