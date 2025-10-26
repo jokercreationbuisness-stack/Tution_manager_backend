@@ -1478,10 +1478,13 @@ app.delete('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), asy
 
 app.get('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
-    const classes = await ClassModel.find({ teacherId: req.userId })
-      .populate('studentId', 'name')
-      .sort({ dayOfWeek: 1, startTime: 1 })
-      .lean();
+    const classes = await ClassModel.find({ 
+      teacherId: req.userId,
+      isActive: true  // ✅ Only get active classes!
+    })
+    .populate('studentId', 'name')
+    .sort({ dayOfWeek: 1, startTime: 1 })
+    .lean();
 
     const formattedClasses = classes.map(cls => ({
       id: cls._id.toString(),
