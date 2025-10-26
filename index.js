@@ -524,27 +524,29 @@ app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), as
 // ============================================
 
 // GET /api/student/classes - Only classes from linked teachers
+// GET /api/student/classes - Only classes from linked teachers
 app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
     
-    // Get all teacher IDs that have linked this student
     const linkedTeacherIds = await getLinkedTeacherIds(studentId);
     
     if (linkedTeacherIds.length === 0) {
       return res.json({ success: true, classes: [] });
     }
     
-    // Fetch classes from linked teachers only
     const classes = await ClassModel.find({
       teacherId: { $in: linkedTeacherIds },
       isActive: true,
       $or: [
         { scope: 'ALL' },
-        { scope: { $exists: false } }, // Legacy classes without scope
+        { scope: { $exists: false } },
         { scope: 'INDIVIDUAL', studentId: studentId }
       ]
-    }).lean();
+    })
+    .populate('teacherId', 'name')  // ✅ ADD THIS
+    .sort({ dayOfWeek: 1, startTime: 1 })
+    .lean();
     
     const formatted = classes.map(c => ({
       id: c._id.toString(),
@@ -554,7 +556,8 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
       endTime: c.endTime,
       colorHex: c.colorHex,
       notes: c.notes,
-      location: c.location
+      location: c.location,
+      teacherName: c.teacherId?.name  // ✅ ADD THIS
     }));
     
     res.json({ success: true, classes: formatted });
