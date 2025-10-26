@@ -1736,13 +1736,13 @@ app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, 
     const formattedNotes = notes.map(note => ({
       id: note._id.toString(),
       title: note.title,
-      content: note.content,
-      subject: note.subject
+      content: note.content,  // ← Add this
+      subject: note.subject   // ← Add this
     }));
 
     res.json({ success: true, notes: formattedNotes });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch notes' });
+    res.status(500).json({ success: false, error: 'Failed to fetch notes' });
   }
 });
 
