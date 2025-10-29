@@ -2944,14 +2944,15 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
     
     // Create and save the message
     const message = new Message({
-      conversationId: conversation._id,
-      senderId: senderId,
-      content: content,
-      type: type,
-      createdAt: new Date(),
-      delivered: false,
-      read: false
-    });
+  conversationId: conversation._id,
+  senderId: senderId,           // ✅ Sender
+  receiverId: receiverId,       // ✅ Add this line!
+  content: content,
+  type: type,
+  createdAt: new Date(),
+  delivered: false,
+  read: false
+});
     
     await message.save();
     
