@@ -350,6 +350,7 @@ const Message = mongoose.model('Message', MessageSchema);
 // ========= HELPER FUNCTIONS =========
 
 // ========= MODELS =========
+// ========= MODELS =========
 const User = mongoose.model('User', UserSchema);
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
 const ClassModel = mongoose.model('Class', ClassSchema);
@@ -360,6 +361,10 @@ const Exam = mongoose.model('Exam', ExamSchema);
 const Result = mongoose.model('Result', ResultSchema);
 const Attendance = mongoose.model('Attendance', AttendanceSchema);
 const Notification = mongoose.model('Notification', NotificationSchema);
+const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
+const Conversation = mongoose.model('Conversation', ConversationSchema);
+const Message = mongoose.model('Message', MessageSchema);
+const UserBlock = mongoose.model('UserBlock', UserBlockSchema); // Add this line
 
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
