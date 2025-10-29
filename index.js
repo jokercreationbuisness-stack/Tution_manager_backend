@@ -2548,6 +2548,165 @@ app.get('/api/planner/stats', authRequired, async (req, res) => {
   }
 });
 
+// ========= RANKING ENDPOINTS =========
+
+// GET /api/student/rankings - Get all rankings for linked teachers
+app.get('/api/student/rankings', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, rankings: [] });
+    }
+    
+    // Get all published results for this student's linked teachers
+    const results = await Result.find({
+      teacherId: { $in: linkedTeacherIds },
+      published: true
+    })
+    .populate('teacherId', 'name')
+    .populate('studentId', 'name')
+    .lean();
+    
+    // Group results by teacher and exam
+    const rankingsByTeacher = {};
+    
+    for (const teacherId of linkedTeacherIds) {
+      const teacher = await User.findById(teacherId).select('name');
+      const teacherResults = results.filter(r => r.teacherId._id.toString() === teacherId.toString());
+      
+      // Group by exam
+      const examGroups = {};
+      teacherResults.forEach(result => {
+        const key = `${result.examTitle}_${result.subject}`;
+        if (!examGroups[key]) {
+          examGroups[key] = [];
+        }
+        examGroups[key].push(result);
+      });
+      
+      // Calculate rankings for each exam
+      const rankings = [];
+      for (const [key, examResults] of Object.entries(examGroups)) {
+        const sortedResults = examResults.sort((a, b) => {
+          const percentageA = (a.obtainedMarks / a.totalMarks) * 100;
+          const percentageB = (b.obtainedMarks / b.totalMarks) * 100;
+          return percentageB - percentageA;
+        });
+        
+        const rankedResults = sortedResults.map((result, index) => ({
+          rank: index + 1,
+          studentId: result.studentId._id.toString(),
+          studentName: result.studentId.name,
+          obtainedMarks: result.obtainedMarks,
+          totalMarks: result.totalMarks,
+          percentage: Math.round((result.obtainedMarks / result.totalMarks) * 100 * 100) / 100,
+          grade: result.grade,
+          isCurrentStudent: result.studentId._id.toString() === studentId.toString()
+        }));
+        
+        rankings.push({
+          examTitle: examResults[0].examTitle,
+          subject: examResults[0].subject,
+          date: examResults[0].createdAt,
+          totalStudents: rankedResults.length,
+          rankings: rankedResults
+        });
+      }
+      
+      if (rankings.length > 0) {
+        rankingsByTeacher[teacherId.toString()] = {
+          teacherId: teacherId.toString(),
+          teacherName: teacher.name,
+          exams: rankings
+        };
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      rankings: Object.values(rankingsByTeacher)
+    });
+  } catch (error) {
+    console.error('Get student rankings error:', error);
+    res.status(500).json({ error: 'Failed to fetch rankings' });
+  }
+});
+
+// GET /api/teacher/rankings - Teacher view of exam rankings
+app.get('/api/teacher/rankings', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+    
+    // Get all results created by this teacher
+    const results = await Result.find({
+      teacherId,
+      published: true
+    })
+    .populate('studentId', 'name studentCode')
+    .lean();
+    
+    // Group by exam
+    const examGroups = {};
+    results.forEach(result => {
+      const key = `${result.examTitle}_${result.subject}_${result.createdAt.toDateString()}`;
+      if (!examGroups[key]) {
+        examGroups[key] = {
+          examTitle: result.examTitle,
+          subject: result.subject,
+          date: result.createdAt,
+          results: []
+        };
+      }
+      examGroups[key].results.push(result);
+    });
+    
+    // Calculate rankings for each exam
+    const rankings = [];
+    for (const [key, examData] of Object.entries(examGroups)) {
+      const sortedResults = examData.results.sort((a, b) => {
+        const percentageA = (a.obtainedMarks / a.totalMarks) * 100;
+        const percentageB = (b.obtainedMarks / b.totalMarks) * 100;
+        return percentageB - percentageA;
+      });
+      
+      const rankedResults = sortedResults.map((result, index) => ({
+        rank: index + 1,
+        studentId: result.studentId._id.toString(),
+        studentName: result.studentId.name,
+        studentCode: result.studentId.studentCode,
+        obtainedMarks: result.obtainedMarks,
+        totalMarks: result.totalMarks,
+        percentage: Math.round((result.obtainedMarks / result.totalMarks) * 100 * 100) / 100,
+        grade: result.grade
+      }));
+      
+      rankings.push({
+        examTitle: examData.examTitle,
+        subject: examData.subject,
+        date: examData.date,
+        totalStudents: rankedResults.length,
+        topPerformer: rankedResults[0]?.studentName,
+        averagePercentage: Math.round(
+          rankedResults.reduce((sum, r) => sum + r.percentage, 0) / rankedResults.length * 100
+        ) / 100,
+        rankings: rankedResults
+      });
+    }
+    
+    rankings.sort((a, b) => new Date(b.date) - new Date(a.date));
+    
+    res.json({ 
+      success: true, 
+      rankings
+    });
+  } catch (error) {
+    console.error('Get teacher rankings error:', error);
+    res.status(500).json({ error: 'Failed to fetch rankings' });
+  }
+});
+
 // ========= 404 HANDLER =========
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'API endpoint not found' });
