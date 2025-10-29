@@ -2901,6 +2901,107 @@ app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req,
   }
 });
 
+// Add this to your backend with your other chat endpoints
+app.post('/api/chat/messages/new', authRequired, async (req, res) => {
+  try {
+    const { receiverId, content, type = 'TEXT' } = req.body;
+    const senderId = req.userId;
+    const senderRole = req.role;
+    
+    if (!receiverId || !content) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'receiverId and content are required' 
+      });
+    }
+    
+    // Determine conversation participants based on roles
+    let teacherId, studentId;
+    if (senderRole === 'TEACHER') {
+      teacherId = senderId;
+      studentId = receiverId;
+    } else {
+      studentId = senderId;
+      teacherId = receiverId;
+    }
+    
+    // Check if conversation already exists
+    let conversation = await Conversation.findOne({
+      teacherId: teacherId,
+      studentId: studentId
+    });
+    
+    // Create conversation if it doesn't exist
+    if (!conversation) {
+      conversation = new Conversation({
+        teacherId: teacherId,
+        studentId: studentId,
+        createdAt: new Date()
+      });
+      await conversation.save();
+      console.log(`Created new conversation: ${conversation._id}`);
+    }
+    
+    // Create and save the message
+    const message = new Message({
+      conversationId: conversation._id,
+      senderId: senderId,
+      content: content,
+      type: type,
+      createdAt: new Date(),
+      delivered: false,
+      read: false
+    });
+    
+    await message.save();
+    
+    // Update conversation with last message info
+    conversation.lastMessage = content;
+    conversation.lastMessageAt = new Date();
+    conversation.lastMessageSenderId = senderId;
+    
+    // Update unread counts
+    if (senderRole === 'TEACHER') {
+      conversation.unreadCountStudent += 1;
+    } else {
+      conversation.unreadCountTeacher += 1;
+    }
+    
+    await conversation.save();
+    
+    // Emit via Socket.IO to receiver (if connected)
+    io.to(`conversation_${conversation._id}`).emit('new_message', {
+      id: message._id.toString(),
+      conversationId: conversation._id.toString(),
+      content: message.content,
+      type: message.type,
+      sender: {
+        id: senderId,
+        name: req.user?.name || 'User',
+        role: senderRole
+      },
+      createdAt: message.createdAt,
+      delivered: false,
+      read: false
+    });
+    
+    // Return success response
+    res.json({
+      success: true,
+      conversationId: conversation._id.toString(),
+      messageId: message._id.toString(),
+      message: 'Message sent successfully'
+    });
+    
+  } catch (error) {
+    console.error('Send new message error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to send message' 
+    });
+  }
+});
+
 // ========= CATCH-ALL ROUTE =========
 app.use('*', (req, res) => {
   res.status(404).json({ 
