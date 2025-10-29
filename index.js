@@ -303,6 +303,47 @@ const PlannerTaskSchema = new Schema({
 
 const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
 
+// After: const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
+// ADD THIS ENTIRE SECTION:
+
+// ========= CHAT SCHEMAS =========
+const ConversationSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true },
+  studentId: { type: Types.ObjectId, ref: 'User', required: true },
+  lastMessage: { type: String },
+  lastMessageAt: { type: Date, default: Date.now },
+  lastMessageSenderId: { type: Types.ObjectId, ref: 'User' },
+  unreadCountTeacher: { type: Number, default: 0 },
+  unreadCountStudent: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now }
+});
+ConversationSchema.index({ teacherId: 1, studentId: 1 }, { unique: true });
+
+const MessageSchema = new Schema({
+  conversationId: { type: Types.ObjectId, ref: 'Conversation', required: true },
+  senderId: { type: Types.ObjectId, ref: 'User', required: true },
+  receiverId: { type: Types.ObjectId, ref: 'User', required: true },
+  content: { type: String },
+  type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF'], default: 'TEXT' },
+  fileUrl: { type: String },
+  fileName: { type: String },
+  fileSize: { type: Number },
+  mimeType: { type: String },
+  iv: { type: String },
+  delivered: { type: Boolean, default: false },
+  deliveredAt: { type: Date },
+  read: { type: Boolean, default: false },
+  readAt: { type: Date },
+  deleted: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+MessageSchema.index({ conversationId: 1, createdAt: -1 });
+
+const Conversation = mongoose.model('Conversation', ConversationSchema);
+const Message = mongoose.model('Message', MessageSchema);
+
+// ========= HELPER FUNCTIONS =========
+
 // ========= MODELS =========
 const User = mongoose.model('User', UserSchema);
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
