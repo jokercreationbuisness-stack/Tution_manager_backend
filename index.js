@@ -10,9 +10,8 @@ const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
 const http = require('http');
 const socketIo = require('socket.io');
-// After: const socketIo = require('socket.io');
-// ADD THESE NEW DEPENDENCIES:
 
+// ADD THESE NEW DEPENDENCIES:
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -47,9 +46,6 @@ const limiter = rateLimit({
   trustProxy: 1
 });
 app.use('/api/', limiter);
-
-// After: app.use('/api/', limiter);
-// ADD THIS ENTIRE SECTION:
 
 // ========= CHAT & FILE UPLOAD SETUP =========
 const uploadDir = path.join(__dirname, 'uploads');
@@ -123,7 +119,7 @@ const UserSchema = new Schema({
   fcmToken: { type: String },
   isActive: { type: Boolean, default: true },
   lastLogin: { type: Date },
-    isOnline: { type: Boolean, default: false },
+  isOnline: { type: Boolean, default: false },
   lastSeen: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
@@ -281,7 +277,7 @@ const NotificationSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-// Planner/Task Schema - Add this after the Notification Schema
+// Planner/Task Schema
 const PlannerTaskSchema = new Schema({
   userId: { type: Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true },
@@ -302,11 +298,6 @@ const PlannerTaskSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
-
-const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
-
-// After: const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
-// ADD THIS ENTIRE SECTION:
 
 // ========= CHAT SCHEMAS =========
 const ConversationSchema = new Schema({
@@ -337,19 +328,21 @@ const MessageSchema = new Schema({
   read: { type: Boolean, default: false },
   readAt: { type: Date },
   deleted: { type: Boolean, default: false },
-    deletedAt: { type: Date },
+  deletedAt: { type: Date },
   deletedBy: { type: Types.ObjectId, ref: 'User' },
   deletedForUsers: [{ type: Types.ObjectId, ref: 'User' }],
   createdAt: { type: Date, default: Date.now }
 });
 MessageSchema.index({ conversationId: 1, createdAt: -1 });
 
-const Conversation = mongoose.model('Conversation', ConversationSchema);
-const Message = mongoose.model('Message', MessageSchema);
+// ========= USER BLOCK SCHEMA =========
+const UserBlockSchema = new Schema({
+  blockerId: { type: Types.ObjectId, ref: 'User', required: true },
+  blockedId: { type: Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
 
-// ========= HELPER FUNCTIONS =========
-
-// ========= MODELS =========
 // ========= MODELS =========
 const User = mongoose.model('User', UserSchema);
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
@@ -364,7 +357,7 @@ const Notification = mongoose.model('Notification', NotificationSchema);
 const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 const Message = mongoose.model('Message', MessageSchema);
-const UserBlock = mongoose.model('UserBlock', UserBlockSchema); // Add this line
+const UserBlock = mongoose.model('UserBlock', UserBlockSchema);
 
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
@@ -448,7 +441,6 @@ const requireRole = (role) => (req, res, next) => {
 };
 
 // ========= SOCKET.IO FOR REAL-TIME =========
-// ========= ENHANCED SOCKET.IO FOR CHAT =========
 const connectedUsers = new Map(); // userId -> socketId
 
 io.on('connection', (socket) => {
@@ -459,19 +451,15 @@ io.on('connection', (socket) => {
     try {
       console.log('🔐 Authentication attempt from socket:', socket.id);
       
-      // Validate input data
       if (!data || !data.token) {
         socket.emit('auth_error', { error: 'Authentication token is required' });
         return;
       }
 
       const { token } = data;
-      
-      // Verify JWT token
       const decoded = jwt.verify(token, JWT_SECRET);
-      
-      // Validate user exists and is active
       const user = await User.findById(decoded.sub).select('isActive role name email');
+      
       if (!user) {
         socket.emit('auth_error', { error: 'User not found' });
         return;
@@ -482,15 +470,12 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Store user info in socket session
       socket.userId = decoded.sub;
       socket.role = decoded.role;
       socket.userEmail = decoded.email;
       
-      // Update connected users map
       const previousSocketId = connectedUsers.get(socket.userId);
       if (previousSocketId) {
-        // Disconnect previous socket if same user connects from another device
         const previousSocket = io.sockets.sockets.get(previousSocketId);
         if (previousSocket && previousSocket.id !== socket.id) {
           previousSocket.emit('session_expired', { message: 'Logged in from another device' });
@@ -499,18 +484,13 @@ io.on('connection', (socket) => {
       }
       
       connectedUsers.set(socket.userId, socket.id);
-      
-      // Join user's personal room
       socket.join(socket.userId);
-      console.log(`✅ User ${socket.userId} joined room: ${socket.userId}`);
       
-      // Mark user as online in database
       await User.findByIdAndUpdate(socket.userId, {
         isOnline: true,
         lastSeen: new Date()
       });
       
-      // Notify all clients that user is online
       io.emit('user_online', { 
         userId: socket.userId,
         userInfo: {
@@ -522,7 +502,6 @@ io.on('connection', (socket) => {
       
       console.log(`✅ User ${socket.userId} (${user.role}) authenticated successfully`);
       
-      // Send success response
       socket.emit('authenticated', { 
         success: true,
         user: {
@@ -537,7 +516,6 @@ io.on('connection', (socket) => {
       console.error('❌ Authentication error:', error.message);
       
       let errorMessage = 'Authentication failed';
-      
       if (error.name === 'JsonWebTokenError') {
         errorMessage = 'Invalid token';
       } else if (error.name === 'TokenExpiredError') {
@@ -559,14 +537,11 @@ io.on('connection', (socket) => {
       socket.emit('error', { error: 'Authentication required' });
       return;
     }
-    
     socket.join(`conversation_${conversationId}`);
-    console.log(`💬 User ${socket.userId} joined conversation: ${conversationId}`);
   });
 
   socket.on('leave_conversation', (conversationId) => {
     socket.leave(`conversation_${conversationId}`);
-    console.log(`💬 User ${socket.userId} left conversation: ${conversationId}`);
   });
 
   // ========= MESSAGE HANDLING =========
@@ -587,7 +562,6 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Verify conversation exists and user has access
       const conversation = await Conversation.findById(conversationId);
       if (!conversation) {
         socket.emit('message_error', { error: 'Conversation not found', tempId });
@@ -600,7 +574,6 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Create message
       const message = await Message.create({
         conversationId,
         senderId: socket.userId,
@@ -612,7 +585,6 @@ io.on('connection', (socket) => {
         read: false
       });
 
-      // Update conversation last message
       await Conversation.findByIdAndUpdate(conversationId, {
         lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type?.toLowerCase() || 'file'}`,
         lastMessageAt: new Date(),
@@ -623,7 +595,6 @@ io.on('connection', (socket) => {
         }
       });
 
-      // Populate message with sender info
       const populatedMessage = await Message.findById(message._id)
         .populate('senderId', 'name avatar role')
         .lean();
@@ -633,13 +604,9 @@ io.on('connection', (socket) => {
         id: populatedMessage._id.toString()
       };
 
-      // Emit to conversation room
       io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-
-      // Emit to receiver's personal room
       io.to(receiverId.toString()).emit('new_message', messagePayload);
 
-      // Mark as delivered if receiver is online
       if (connectedUsers.has(receiverId.toString())) {
         await Message.findByIdAndUpdate(message._id, {
           delivered: true,
@@ -651,7 +618,6 @@ io.on('connection', (socket) => {
         });
       }
 
-      // Send notification
       await createNotification(
         receiverId,
         'CHAT',
@@ -660,13 +626,10 @@ io.on('connection', (socket) => {
         { conversationId, messageId: message._id }
       );
 
-      // Confirm message sent to sender
       socket.emit('message_sent', { 
         messageId: message._id.toString(),
         tempId 
       });
-
-      console.log(`✉️ Message sent by ${socket.userId} in conversation ${conversationId}`);
 
     } catch (error) {
       console.error('❌ Send message error:', error);
@@ -682,16 +645,13 @@ io.on('connection', (socket) => {
     try {
       const { messageId, conversationId } = data;
       
-      if (!socket.userId) {
-        return;
-      }
+      if (!socket.userId) return;
 
       await Message.findByIdAndUpdate(messageId, {
         read: true,
         readAt: new Date()
       });
 
-      // Reset unread count for current user
       if (socket.role === 'TEACHER') {
         await Conversation.findByIdAndUpdate(conversationId, {
           unreadCountTeacher: 0
@@ -720,7 +680,6 @@ io.on('connection', (socket) => {
         lastSeen: new Date()
       });
       io.emit('user_online', { userId: socket.userId });
-      console.log(`🟢 User ${socket.userId} is online`);
     }
   });
 
@@ -735,16 +694,13 @@ io.on('connection', (socket) => {
         userId: socket.userId,
         lastSeen: lastSeen.toISOString()
       });
-      console.log(`🔴 User ${socket.userId} is offline`);
     }
   });
 
   // ========= TYPING INDICATORS =========
   socket.on('typing', (data) => {
     const { conversationId, receiverId } = data;
-    
     if (!socket.userId) return;
-    
     io.to(receiverId.toString()).emit('user_typing', { 
       conversationId, 
       userId: socket.userId 
@@ -753,21 +709,11 @@ io.on('connection', (socket) => {
 
   socket.on('stop_typing', (data) => {
     const { conversationId, receiverId } = data;
-    
     if (!socket.userId) return;
-    
     io.to(receiverId.toString()).emit('user_stop_typing', { 
       conversationId, 
       userId: socket.userId 
     });
-  });
-
-  // ========= USER ROOM MANAGEMENT =========
-  socket.on('join_user', (userId) => {
-    if (socket.userId === userId) {
-      socket.join(userId);
-      console.log(`👤 User ${userId} joined their room`);
-    }
   });
 
   // ========= DISCONNECTION HANDLER =========
@@ -775,32 +721,24 @@ io.on('connection', (socket) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
     if (socket.userId) {
-      // Remove from connected users
       connectedUsers.delete(socket.userId);
-      
-      // Mark user as offline
       const lastSeen = new Date();
       await User.findByIdAndUpdate(socket.userId, {
         isOnline: false,
         lastSeen: lastSeen
       });
       
-      // Notify others user is offline
       io.emit('user_offline', { 
         userId: socket.userId,
         lastSeen: lastSeen.toISOString()
       });
-      
-      console.log(`🔴 User ${socket.userId} disconnected and marked offline`);
     }
   });
 
-  // ========= ERROR HANDLING =========
   socket.on('error', (error) => {
     console.error('❌ Socket error:', error);
   });
-
-}); // End of io.on('connection')
+});
 
 // ========= ROOT & HEALTH ENDPOINTS =========
 app.get('/', (req, res) => {
@@ -3668,7 +3606,7 @@ app.use((error, req, res, next) => {
 });
 
 // ========= START SERVER =========
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 Health check: http://localhost:${PORT}/health`);
@@ -3696,4 +3634,4 @@ process.on('SIGINT', () => {
       process.exit(0);
     });
   });
-}); // Closing the io.on('connection') handler
+});
