@@ -3088,36 +3088,40 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
       .sort({ lastMessageAt: -1 })
       .lean();
     
-    const formatted = conversations.map(conv => ({
+        const formatted = conversations.map(conv => ({
       id: conv._id.toString(),
       teacher: {
         id: conv.teacherId._id.toString(),
         name: conv.teacherId.name,
         avatar: conv.teacherId.avatar,
-        email: conv.teacherId.email
+        email: conv.teacherId.email,
+        isOnline: conv.teacherId.isOnline,
+        lastSeen: conv.teacherId.lastSeen
       },
       student: {
         id: conv.studentId._id.toString(),
         name: conv.studentId.name,
         avatar: conv.studentId.avatar,
         email: conv.studentId.email,
-        studentCode: conv.studentId.studentCode
+        studentCode: conv.studentId.studentCode,
+        isOnline: conv.studentId.isOnline,
+        lastSeen: conv.studentId.lastSeen
       },
       otherUser: role === 'TEACHER' ? {
-  id: conv.studentId._id.toString(),
-  name: conv.studentId.name,
-  avatar: conv.studentId.avatar,
-  role: 'STUDENT',
-  isOnline: conv.studentId.isOnline || false,
-  lastSeen: conv.studentId.lastSeen ? conv.studentId.lastSeen.toISOString() : null
-} : {
-  id: conv.teacherId._id.toString(),
-  name: conv.teacherId.name,
-  avatar: conv.teacherId.avatar,
-  role: 'TEACHER',
-  isOnline: conv.teacherId.isOnline || false,
-  lastSeen: conv.teacherId.lastSeen ? conv.teacherId.lastSeen.toISOString() : null
-},
+        id: conv.studentId._id.toString(),
+        name: conv.studentId.name,
+        avatar: conv.studentId.avatar,
+        role: 'STUDENT',
+        isOnline: conv.studentId.isOnline,
+        lastSeen: conv.studentId.lastSeen
+      } : {
+        id: conv.teacherId._id.toString(),
+        name: conv.teacherId.name,
+        avatar: conv.teacherId.avatar,
+        role: 'TEACHER',
+        isOnline: conv.teacherId.isOnline,
+        lastSeen: conv.teacherId.lastSeen
+      },
       lastMessage: conv.lastMessage,
       lastMessageAt: conv.lastMessageAt,
       lastMessageSender: conv.lastMessageSenderId?.name,
@@ -3132,6 +3136,7 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/chat/conversations - Create or get conversation
 app.post('/api/chat/conversations', authRequired, async (req, res) => {
   try {
     const { otherUserId } = req.body;
@@ -3145,11 +3150,13 @@ app.post('/api/chat/conversations', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
+    // Determine teacher and student IDs
     let teacherId, studentId;
     if (req.role === 'TEACHER') {
       teacherId = req.userId;
       studentId = otherUserId;
       
+      // Verify link
       const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
       if (!isLinked) {
         return res.status(403).json({ error: 'Not linked to this student' });
@@ -3158,12 +3165,14 @@ app.post('/api/chat/conversations', authRequired, async (req, res) => {
       studentId = req.userId;
       teacherId = otherUserId;
       
+      // Verify link
       const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
       if (!isLinked) {
         return res.status(403).json({ error: 'Not linked to this teacher' });
       }
     }
     
+    // Find or create conversation
     let conversation = await Conversation.findOne({ teacherId, studentId });
     
     if (!conversation) {
@@ -3175,8 +3184,8 @@ app.post('/api/chat/conversations', authRequired, async (req, res) => {
     }
     
     const populated = await Conversation.findById(conversation._id)
-      .populate('teacherId', 'name avatar email')
-      .populate('studentId', 'name avatar email studentCode')
+      .populate('teacherId', 'name avatar email isOnline lastSeen')
+      .populate('studentId', 'name avatar email studentCode isOnline lastSeen')
       .lean();
     
     res.json({
@@ -3186,24 +3195,32 @@ app.post('/api/chat/conversations', authRequired, async (req, res) => {
         teacher: {
           id: populated.teacherId._id.toString(),
           name: populated.teacherId.name,
-          avatar: populated.teacherId.avatar
+          avatar: populated.teacherId.avatar,
+          isOnline: populated.teacherId.isOnline,
+          lastSeen: populated.teacherId.lastSeen
         },
         student: {
           id: populated.studentId._id.toString(),
           name: populated.studentId.name,
           avatar: populated.studentId.avatar,
-          studentCode: populated.studentId.studentCode
+          studentCode: populated.studentId.studentCode,
+          isOnline: populated.studentId.isOnline,
+          lastSeen: populated.studentId.lastSeen
         },
         otherUser: req.role === 'TEACHER' ? {
           id: populated.studentId._id.toString(),
           name: populated.studentId.name,
           avatar: populated.studentId.avatar,
-          role: 'STUDENT'
+          role: 'STUDENT',
+          isOnline: populated.studentId.isOnline,
+          lastSeen: populated.studentId.lastSeen
         } : {
           id: populated.teacherId._id.toString(),
           name: populated.teacherId.name,
           avatar: populated.teacherId.avatar,
-          role: 'TEACHER'
+          role: 'TEACHER',
+          isOnline: populated.teacherId.isOnline,
+          lastSeen: populated.teacherId.lastSeen
         }
       }
     });
@@ -3213,12 +3230,14 @@ app.post('/api/chat/conversations', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/chat/conversations/:id/messages - Get messages for a conversation
 app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
     const { page = 1, limit = 50 } = req.query;
     const skip = (page - 1) * limit;
     
+    // Verify user is part of conversation
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       return res.status(404).json({ error: 'Conversation not found' });
@@ -3230,11 +3249,14 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
     }
     
     const messages = await Message.find({
-  conversationId: conversationId,
-  deletedForUsers: { $ne: userId }  // ← This line
-})
-      .populate('senderId', 'name avatar role isOnline lastSeen')
-.populate('receiverId', 'name avatar role isOnline lastSeen')
+      conversationId,
+      $and: [
+        { deleted: false },
+        { deletedForUsers: { $ne: userId } }
+      ]
+    })
+      .populate('senderId', 'name avatar role')
+      .populate('receiverId', 'name avatar role')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
@@ -3244,22 +3266,17 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
       id: msg._id.toString(),
       conversationId: msg.conversationId.toString(),
       sender: {
-  id: msg.senderId._id.toString(),
-  name: msg.senderId.name,
-  avatar: msg.senderId.avatar,
-  role: msg.senderId.role,
-  isOnline: msg.senderId.isOnline || false,
-  lastSeen: msg.senderId.lastSeen ? msg.senderId.lastSeen.toISOString() : null
-},
-receiver: {
-  id: msg.receiverId._id.toString(),
-  name: msg.receiverId.name,
-  avatar: msg.receiverId.avatar,
-  role: msg.receiverId.role,
-  isOnline: msg.receiverId.isOnline || false,
-  lastSeen: msg.receiverId.lastSeen ? msg.receiverId.lastSeen.toISOString() : null
-},
-      deleted: msg.deleted || false,
+        id: msg.senderId._id.toString(),
+        name: msg.senderId.name,
+        avatar: msg.senderId.avatar,
+        role: msg.senderId.role
+      },
+      receiver: {
+        id: msg.receiverId._id.toString(),
+        name: msg.receiverId.name,
+        avatar: msg.receiverId.avatar,
+        role: msg.receiverId.role
+      },
       content: msg.content,
       type: msg.type,
       fileUrl: msg.fileUrl,
@@ -3272,8 +3289,10 @@ receiver: {
       read: msg.read,
       readAt: msg.readAt,
       createdAt: msg.createdAt,
-      isMine: msg.senderId._id.toString() === userId
-    })).reverse();
+      isMine: msg.senderId._id.toString() === userId,
+      deletedForMe: msg.deletedForUsers && msg.deletedForUsers.includes(userId),
+      deletedForEveryone: msg.deleted
+    })).reverse(); // Reverse to get chronological order
     
     res.json({ success: true, messages: formatted });
   } catch (error) {
@@ -3282,6 +3301,7 @@ receiver: {
   }
 });
 
+// POST /api/chat/upload - Upload file for chat
 app.post('/api/chat/upload', authRequired, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -3307,6 +3327,7 @@ app.post('/api/chat/upload', authRequired, upload.single('file'), async (req, re
   }
 });
 
+// PATCH /api/chat/conversations/:id/read - Mark conversation as read
 app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
@@ -3318,10 +3339,12 @@ app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => 
       return res.status(404).json({ error: 'Conversation not found' });
     }
     
+    // Verify user is part of conversation
     if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
+    // Mark all unread messages as read
     await Message.updateMany(
       {
         conversationId,
@@ -3334,6 +3357,7 @@ app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => 
       }
     );
     
+    // Reset unread count
     const updateField = role === 'TEACHER' ? 'unreadCountTeacher' : 'unreadCountStudent';
     await Conversation.findByIdAndUpdate(conversationId, {
       [updateField]: 0
@@ -3346,49 +3370,53 @@ app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => 
   }
 });
 
-app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
-  try {
-    const messageId = req.params.id;
-    const userId = req.userId;
-    
-    const message = await Message.findById(messageId);
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
-    
-    if (message.senderId.toString() !== userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-    
-    message.deleted = true;
-    await message.save();
-    
-    io.to(`conversation_${message.conversationId}`).emit('message_deleted', {
-      messageId: messageId
-    });
-    
-    res.status(204).send();
-  } catch (error) {
-    console.error('Delete message error:', error);
-    res.status(500).json({ error: 'Failed to delete message' });
-  }
-});
-
-// ========= 404 HANDLER =========
+// ========= CATCH-ALL ROUTE =========
 app.use('*', (req, res) => {
-  res.status(404).json({ error: 'API endpoint not found' });
+  res.status(404).json({ 
+    error: 'Endpoint not found',
+    path: req.originalUrl,
+    method: req.method
+  });
 });
 
 // ========= ERROR HANDLER =========
 app.use((error, req, res, next) => {
-  console.error('Server error:', error);
-  res.status(500).json({ error: 'Internal server error' });
+  console.error('Unhandled error:', error);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
+  });
 });
 
 // ========= START SERVER =========
 server.listen(PORT, () => {
-  console.log(`🚀 Tuition Manager Backend running on port ${PORT}`);
-  console.log(`📱 Mobile-optimized API ready`);
-  console.log(`🔗 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🗄️  Database: ${MONGODB_URI}`);
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 API Base: http://localhost:${PORT}/api`);
 });
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('👋 SIGTERM received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Process terminated');
+    mongoose.connection.close(false, () => {
+      console.log('📦 MongoDB connection closed');
+      process.exit(0);
+    });
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('👋 SIGINT received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('✅ Process terminated');
+    mongoose.connection.close(false, () => {
+      console.log('📦 MongoDB connection closed');
+      process.exit(0);
+    });
+  });
+});
+
+}); // THIS CLOSING BRACE IS FOR THE io.on('connection') HANDLER
