@@ -3241,6 +3241,81 @@ app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req,
   }
 });
 
+  // GET /api/chat/conversations/:id/messages - Get messages for a conversation
+app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { page = 1, limit = 50 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    // Verify user has access to this conversation
+    if (conversation.teacherId.toString() !== req.userId && conversation.studentId.toString() !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const messages = await Message.find({
+      conversationId,
+      deletedForUsers: { $ne: req.userId }
+    })
+    .populate('senderId', 'name avatar role')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(parseInt(limit))
+    .lean();
+    
+    const formatted = messages.map(msg => ({
+      id: msg._id.toString(),
+      content: msg.content,
+      type: msg.type,
+      fileUrl: msg.fileUrl,
+      fileName: msg.fileName,
+      fileSize: msg.fileSize,
+      sender: {
+        id: msg.senderId._id.toString(),
+        name: msg.senderId.name,
+        avatar: msg.senderId.avatar,
+        role: msg.senderId.role
+      },
+      delivered: msg.delivered,
+      read: msg.read,
+      createdAt: msg.createdAt,
+      deleted: msg.deleted
+    })).reverse();
+    
+    res.json({ success: true, messages: formatted });
+  } catch (error) {
+    console.error('Get messages error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// POST /api/chat/upload-file - Upload file for chat
+app.post('/api/chat/upload-file', authRequired, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      fileUrl,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype
+    });
+  } catch (error) {
+    console.error('File upload error:', error);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
 // ========= ENHANCED MESSAGE ACTIONS =========
 
 // POST /api/chat/messages/:id/copy - Copy message content
@@ -3420,6 +3495,7 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
 });
 
 // ========= CATCH-ALL ROUTE =========
+// ========= CATCH-ALL ROUTE =========
 app.use('*', (req, res) => {
   res.status(404).json({ 
     error: 'Endpoint not found',
@@ -3466,6 +3542,4 @@ process.on('SIGINT', () => {
       process.exit(0);
     });
   });
-});
-
 }); // Closing the io.on('connection') handler
