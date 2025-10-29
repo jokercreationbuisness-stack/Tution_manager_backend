@@ -471,71 +471,77 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    try {
-      const { conversationId, receiverId, content, type, iv } = data;
-      
-      if (!socket.userId) {
-        socket.emit('message_error', { error: 'Not authenticated' });
-        return;
-      }
-
-      const message = await Message.create({
-        conversationId,
-        senderId: socket.userId,
-        receiverId,
-        content,
-        type: type || 'TEXT',
-        iv,
-        delivered: false,
-        read: false
-      });
-
-      await Conversation.findByIdAndUpdate(conversationId, {
-        lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type.toLowerCase()}`,
-        lastMessageAt: new Date(),
-        lastMessageSenderId: socket.userId,
-        $inc: {
-          unreadCountTeacher: socket.role === 'STUDENT' ? 1 : 0,
-          unreadCountStudent: socket.role === 'TEACHER' ? 1 : 0
-        }
-      });
-
-      const populatedMessage = await Message.findById(message._id)
-        .populate('senderId', 'name avatar role')
-        .lean();
-
-      io.to(`conversation_${conversationId}`).emit('new_message', {
-        ...populatedMessage,
-        id: populatedMessage._id.toString()
-      });
-
-      if (connectedUsers.has(receiverId.toString())) {
-        message.delivered = true;
-        message.deliveredAt = new Date();
-        await message.save();
-        
-        io.to(`conversation_${conversationId}`).emit('message_delivered', {
-          messageId: message._id.toString()
-        });
-      }
-
-      await createNotification(
-        receiverId,
-        'CHAT',
-        'New Message',
-        `${socket.role === 'TEACHER' ? 'Your teacher' : 'Your student'} sent you a message`,
-        { conversationId, messageId: message._id }
-      );
-
-      socket.emit('message_sent', { 
-        messageId: message._id.toString(),
-        tempId: data.tempId 
-      });
-    } catch (error) {
-      console.error('Send message error:', error);
-      socket.emit('message_error', { error: 'Failed to send message' });
+  try {
+    const { conversationId, receiverId, content, type, iv } = data;
+    
+    if (!socket.userId) {
+      socket.emit('message_error', { error: 'Not authenticated' });
+      return;
     }
-  });
+
+    const message = await Message.create({
+      conversationId,
+      senderId: socket.userId,
+      receiverId,
+      content,
+      type: type || 'TEXT',
+      iv,
+      delivered: false,
+      read: false
+    });
+
+    await Conversation.findByIdAndUpdate(conversationId, {
+      lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type.toLowerCase()}`,
+      lastMessageAt: new Date(),
+      lastMessageSenderId: socket.userId,
+      $inc: {
+        unreadCountTeacher: socket.role === 'STUDENT' ? 1 : 0,
+        unreadCountStudent: socket.role === 'TEACHER' ? 1 : 0
+      }
+    });
+
+    const populatedMessage = await Message.findById(message._id)
+      .populate('senderId', 'name avatar role')
+      .lean();
+
+    const messagePayload = {
+      ...populatedMessage,
+      id: populatedMessage._id.toString()
+    };
+
+    // ✅ Emit to conversation room (for ChatActivity when open)
+    io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+
+    // ✅ Emit to receiver's personal room (for ChatBackgroundService)
+    io.to(receiverId.toString()).emit('new_message', messagePayload);
+
+    if (connectedUsers.has(receiverId.toString())) {
+      message.delivered = true;
+      message.deliveredAt = new Date();
+      await message.save();
+      
+      io.to(`conversation_${conversationId}`).emit('message_delivered', {
+        messageId: message._id.toString()
+      });
+    }
+
+    await createNotification(
+      receiverId,
+      'CHAT',
+      'New Message',
+      `${socket.role === 'TEACHER' ? 'Your teacher' : 'Your student'} sent you a message`,
+      { conversationId, messageId: message._id }
+    );
+
+    socket.emit('message_sent', { 
+      messageId: message._id.toString(),
+      tempId: data.tempId 
+    });
+  } catch (error) {
+    console.error('Send message error:', error);
+    socket.emit('message_error', { error: 'Failed to send message' });
+  }
+});
 
   socket.on('mark_read', async (data) => {
     try {
