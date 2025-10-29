@@ -3081,14 +3081,14 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
       query.studentId = userId;
     }
     
-    const conversations = await Conversation.find(query)
+        const conversations = await Conversation.find(query)
       .populate('teacherId', 'name avatar email isOnline lastSeen')
-.populate('studentId', 'name avatar email studentCode isOnline lastSeen')
+      .populate('studentId', 'name avatar email studentCode isOnline lastSeen')
       .populate('lastMessageSenderId', 'name role')
       .sort({ lastMessageAt: -1 })
       .lean();
     
-        const formatted = conversations.map(conv => ({
+    const formatted = conversations.map(conv => ({
       id: conv._id.toString(),
       teacher: {
         id: conv.teacherId._id.toString(),
@@ -3136,199 +3136,171 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/chat/conversations - Create or get conversation
-app.post('/api/chat/conversations', authRequired, async (req, res) => {
+// ========= NEW: USER BLOCKING SYSTEM =========
+const UserBlockSchema = new Schema({
+  blockerId: { type: Types.ObjectId, ref: 'User', required: true },
+  blockedId: { type: Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
+
+const UserBlock = mongoose.model('UserBlock', UserBlockSchema);
+
+// POST /api/users/block - Block a user
+app.post('/api/users/block', authRequired, async (req, res) => {
   try {
-    const { otherUserId } = req.body;
+    const { userId } = req.body;
+    const blockerId = req.userId;
     
-    if (!otherUserId) {
-      return res.status(400).json({ error: 'Other user ID is required' });
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
     }
     
-    const otherUser = await User.findById(otherUserId);
-    if (!otherUser) {
-      return res.status(404).json({ error: 'User not found' });
+    if (userId === blockerId) {
+      return res.status(400).json({ error: 'Cannot block yourself' });
     }
     
-    // Determine teacher and student IDs
-    let teacherId, studentId;
-    if (req.role === 'TEACHER') {
-      teacherId = req.userId;
-      studentId = otherUserId;
-      
-      // Verify link
-      const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not linked to this student' });
-      }
-    } else {
-      studentId = req.userId;
-      teacherId = otherUserId;
-      
-      // Verify link
-      const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not linked to this teacher' });
-      }
+    // Check if already blocked
+    const existingBlock = await UserBlock.findOne({ blockerId, blockedId: userId });
+    if (existingBlock) {
+      return res.status(400).json({ error: 'User already blocked' });
     }
     
-    // Find or create conversation
-    let conversation = await Conversation.findOne({ teacherId, studentId });
+    await UserBlock.create({ blockerId, blockedId: userId });
     
-    if (!conversation) {
-      conversation = await Conversation.create({
-        teacherId,
-        studentId,
-        lastMessageAt: new Date()
-      });
-    }
-    
-    const populated = await Conversation.findById(conversation._id)
-      .populate('teacherId', 'name avatar email isOnline lastSeen')
-      .populate('studentId', 'name avatar email studentCode isOnline lastSeen')
-      .lean();
-    
-    res.json({
-      success: true,
-      conversation: {
-        id: populated._id.toString(),
-        teacher: {
-          id: populated.teacherId._id.toString(),
-          name: populated.teacherId.name,
-          avatar: populated.teacherId.avatar,
-          isOnline: populated.teacherId.isOnline,
-          lastSeen: populated.teacherId.lastSeen
-        },
-        student: {
-          id: populated.studentId._id.toString(),
-          name: populated.studentId.name,
-          avatar: populated.studentId.avatar,
-          studentCode: populated.studentId.studentCode,
-          isOnline: populated.studentId.isOnline,
-          lastSeen: populated.studentId.lastSeen
-        },
-        otherUser: req.role === 'TEACHER' ? {
-          id: populated.studentId._id.toString(),
-          name: populated.studentId.name,
-          avatar: populated.studentId.avatar,
-          role: 'STUDENT',
-          isOnline: populated.studentId.isOnline,
-          lastSeen: populated.studentId.lastSeen
-        } : {
-          id: populated.teacherId._id.toString(),
-          name: populated.teacherId.name,
-          avatar: populated.teacherId.avatar,
-          role: 'TEACHER',
-          isOnline: populated.teacherId.isOnline,
-          lastSeen: populated.teacherId.lastSeen
-        }
-      }
-    });
+    res.json({ success: true, message: 'User blocked successfully' });
   } catch (error) {
-    console.error('Create conversation error:', error);
-    res.status(500).json({ error: 'Failed to create conversation' });
+    console.error('Block user error:', error);
+    res.status(500).json({ error: 'Failed to block user' });
   }
 });
 
-// GET /api/chat/conversations/:id/messages - Get messages for a conversation
-app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
+// DELETE /api/users/block/:userId - Unblock a user
+app.delete('/api/users/block/:userId', authRequired, async (req, res) => {
   try {
-    const conversationId = req.params.id;
-    const { page = 1, limit = 50 } = req.query;
-    const skip = (page - 1) * limit;
+    const blockedId = req.params.userId;
+    const blockerId = req.userId;
     
-    // Verify user is part of conversation
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found' });
+    await UserBlock.findOneAndDelete({ blockerId, blockedId });
+    
+    res.json({ success: true, message: 'User unblocked successfully' });
+  } catch (error) {
+    console.error('Unblock user error:', error);
+    res.status(500).json({ error: 'Failed to unblock user' });
+  }
+});
+
+// GET /api/users/blocked - Get blocked users list
+app.get('/api/users/blocked', authRequired, async (req, res) => {
+  try {
+    const blocks = await UserBlock.find({ blockerId: req.userId })
+      .populate('blockedId', 'name avatar email role')
+      .lean();
+    
+    const blockedUsers = blocks.map(block => ({
+      id: block.blockedId._id.toString(),
+      name: block.blockedId.name,
+      avatar: block.blockedId.avatar,
+      email: block.blockedId.email,
+      role: block.blockedId.role,
+      blockedAt: block.createdAt
+    }));
+    
+    res.json({ success: true, blockedUsers });
+  } catch (error) {
+    console.error('Get blocked users error:', error);
+    res.status(500).json({ error: 'Failed to fetch blocked users' });
+  }
+});
+
+// ========= PROFILE PICTURE UPLOAD =========
+app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No image file uploaded' });
     }
     
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
+    if (!allowedTypes.includes(req.file.mimetype)) {
+      return res.status(400).json({ error: 'Only image files are allowed' });
+    }
+    
+    const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    
+    // Update user avatar
+    await User.findByIdAndUpdate(req.userId, { avatar: avatarUrl });
+    
+    res.json({
+      success: true,
+      avatarUrl: avatarUrl
+    });
+  } catch (error) {
+    console.error('Avatar upload error:', error);
+    res.status(500).json({ error: 'Failed to upload avatar' });
+  }
+});
+
+// ========= ENHANCED MESSAGE ACTIONS =========
+
+// POST /api/chat/messages/:id/copy - Copy message content
+app.post('/api/chat/messages/:id/copy', authRequired, async (req, res) => {
+  try {
+    const messageId = req.params.id;
     const userId = req.userId;
+    
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    
+    // Verify user has access to this message
+    const conversation = await Conversation.findById(message.conversationId);
     if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const messages = await Message.find({
-      conversationId,
-      $and: [
-        { deleted: false },
-        { deletedForUsers: { $ne: userId } }
-      ]
-    })
-      .populate('senderId', 'name avatar role')
-      .populate('receiverId', 'name avatar role')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit))
-      .lean();
-    
-    const formatted = messages.map(msg => ({
-      id: msg._id.toString(),
-      conversationId: msg.conversationId.toString(),
-      sender: {
-        id: msg.senderId._id.toString(),
-        name: msg.senderId.name,
-        avatar: msg.senderId.avatar,
-        role: msg.senderId.role
-      },
-      receiver: {
-        id: msg.receiverId._id.toString(),
-        name: msg.receiverId.name,
-        avatar: msg.receiverId.avatar,
-        role: msg.receiverId.role
-      },
-      content: msg.content,
-      type: msg.type,
-      fileUrl: msg.fileUrl,
-      fileName: msg.fileName,
-      fileSize: msg.fileSize,
-      mimeType: msg.mimeType,
-      iv: msg.iv,
-      delivered: msg.delivered,
-      deliveredAt: msg.deliveredAt,
-      read: msg.read,
-      readAt: msg.readAt,
-      createdAt: msg.createdAt,
-      isMine: msg.senderId._id.toString() === userId,
-      deletedForMe: msg.deletedForUsers && msg.deletedForUsers.includes(userId),
-      deletedForEveryone: msg.deleted
-    })).reverse(); // Reverse to get chronological order
-    
-    res.json({ success: true, messages: formatted });
-  } catch (error) {
-    console.error('Get messages error:', error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
-  }
-});
-
-// POST /api/chat/upload - Upload file for chat
-app.post('/api/chat/upload', authRequired, upload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-    
-    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    
-    res.json({
-      success: true,
-      file: {
-        url: fileUrl,
-        filename: req.file.originalname,
-        size: req.file.size,
-        mimeType: req.file.mimetype,
-        type: req.file.mimetype.startsWith('image/') ? 'IMAGE' : 
-              req.file.mimetype === 'application/pdf' ? 'PDF' : 'FILE'
-      }
+    res.json({ 
+      success: true, 
+      content: message.content,
+      type: message.type
     });
   } catch (error) {
-    console.error('File upload error:', error);
-    res.status(500).json({ error: 'Failed to upload file' });
+    console.error('Copy message error:', error);
+    res.status(500).json({ error: 'Failed to copy message' });
   }
 });
 
-// PATCH /api/chat/conversations/:id/read - Mark conversation as read
-app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => {
+// PATCH /api/chat/messages/:id/delete-for-me - Delete message for current user only
+app.patch('/api/chat/messages/:id/delete-for-me', authRequired, async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    const userId = req.userId;
+    
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    
+    // Add user to deletedForUsers array
+    if (!message.deletedForUsers) {
+      message.deletedForUsers = [];
+    }
+    
+    if (!message.deletedForUsers.includes(userId)) {
+      message.deletedForUsers.push(userId);
+      await message.save();
+    }
+    
+    res.json({ success: true, message: 'Message deleted for you' });
+  } catch (error) {
+    console.error('Delete message for me error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
+// DELETE /api/chat/conversations/:id - Delete/Leave conversation
+app.delete('/api/chat/conversations/:id', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
     const userId = req.userId;
@@ -3344,29 +3316,106 @@ app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => 
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    // Mark all unread messages as read
+    // If user wants to remove the chat connection entirely
+    if (role === 'TEACHER') {
+      // Teacher removing student - deactivate the link
+      await TeacherStudentLink.findOneAndUpdate(
+        { teacherId: userId, studentId: conversation.studentId, isActive: true },
+        { isActive: false, unlinkedAt: new Date() }
+      );
+    }
+    // For students, just mark messages as deleted for them
+    
+    // Mark all messages as deleted for this user
     await Message.updateMany(
-      {
-        conversationId,
-        receiverId: userId,
-        read: false
-      },
-      {
-        read: true,
-        readAt: new Date()
-      }
+      { conversationId: conversationId },
+      { $addToSet: { deletedForUsers: userId } }
     );
     
-    // Reset unread count
-    const updateField = role === 'TEACHER' ? 'unreadCountTeacher' : 'unreadCountStudent';
-    await Conversation.findByIdAndUpdate(conversationId, {
-      [updateField]: 0
-    });
-    
-    res.json({ success: true });
+    res.json({ success: true, message: 'Chat deleted successfully' });
   } catch (error) {
-    console.error('Mark conversation read error:', error);
-    res.status(500).json({ error: 'Failed to mark as read' });
+    console.error('Delete conversation error:', error);
+    res.status(500).json({ error: 'Failed to delete conversation' });
+  }
+});
+
+// ========= UPDATED CHAT ENDPOINTS WITH BLOCKING =========
+
+// GET /api/chat/conversations - Updated to filter blocked users
+app.get('/api/chat/conversations', authRequired, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const role = req.role;
+    
+    // Get blocked user IDs
+    const blocks = await UserBlock.find({ blockerId: userId }).select('blockedId');
+    const blockedUserIds = blocks.map(block => block.blockedId.toString());
+    
+    let query = {};
+    if (role === 'TEACHER') {
+      query.teacherId = userId;
+      if (blockedUserIds.length > 0) {
+        query.studentId = { $nin: blockedUserIds };
+      }
+    } else {
+      query.studentId = userId;
+      if (blockedUserIds.length > 0) {
+        query.teacherId = { $nin: blockedUserIds };
+      }
+    }
+    
+    const conversations = await Conversation.find(query)
+      .populate('teacherId', 'name avatar email isOnline lastSeen')
+      .populate('studentId', 'name avatar email studentCode isOnline lastSeen')
+      .populate('lastMessageSenderId', 'name role')
+      .sort({ lastMessageAt: -1 })
+      .lean();
+    
+    const formatted = conversations.map(conv => ({
+      id: conv._id.toString(),
+      teacher: {
+        id: conv.teacherId._id.toString(),
+        name: conv.teacherId.name,
+        avatar: conv.teacherId.avatar,
+        email: conv.teacherId.email,
+        isOnline: conv.teacherId.isOnline,
+        lastSeen: conv.teacherId.lastSeen
+      },
+      student: {
+        id: conv.studentId._id.toString(),
+        name: conv.studentId.name,
+        avatar: conv.studentId.avatar,
+        email: conv.studentId.email,
+        studentCode: conv.studentId.studentCode,
+        isOnline: conv.studentId.isOnline,
+        lastSeen: conv.studentId.lastSeen
+      },
+      otherUser: role === 'TEACHER' ? {
+        id: conv.studentId._id.toString(),
+        name: conv.studentId.name,
+        avatar: conv.studentId.avatar,
+        role: 'STUDENT',
+        isOnline: conv.studentId.isOnline,
+        lastSeen: conv.studentId.lastSeen
+      } : {
+        id: conv.teacherId._id.toString(),
+        name: conv.teacherId.name,
+        avatar: conv.teacherId.avatar,
+        role: 'TEACHER',
+        isOnline: conv.teacherId.isOnline,
+        lastSeen: conv.teacherId.lastSeen
+      },
+      lastMessage: conv.lastMessage,
+      lastMessageAt: conv.lastMessageAt,
+      lastMessageSender: conv.lastMessageSenderId?.name,
+      unreadCount: role === 'TEACHER' ? conv.unreadCountTeacher : conv.unreadCountStudent,
+      createdAt: conv.createdAt
+    }));
+    
+    res.json({ success: true, conversations: formatted });
+  } catch (error) {
+    console.error('Get conversations error:', error);
+    res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
 
@@ -3419,4 +3468,4 @@ process.on('SIGINT', () => {
   });
 });
 
-}); // THIS CLOSING BRACE IS FOR THE io.on('connection') HANDLER
+}); // Closing the io.on('connection') handler
