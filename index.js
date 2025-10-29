@@ -3039,6 +3039,7 @@ app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
 });
 
 // DELETE /api/chat/conversations/:id/messages - Delete all messages
+// DELETE /api/chat/conversations/:id/messages - Delete all messages
 app.delete('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
@@ -3049,6 +3050,7 @@ app.delete('/api/chat/conversations/:id/messages', authRequired, async (req, res
       return res.status(404).json({ error: 'Conversation not found' });
     }
     
+    // ✅ THIS IS THE LINE YOU'RE LOOKING FOR:
     if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
