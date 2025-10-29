@@ -123,6 +123,8 @@ const UserSchema = new Schema({
   fcmToken: { type: String },
   isActive: { type: Boolean, default: true },
   lastLogin: { type: Date },
+    isOnline: { type: Boolean, default: false },
+  lastSeen: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -335,6 +337,9 @@ const MessageSchema = new Schema({
   read: { type: Boolean, default: false },
   readAt: { type: Date },
   deleted: { type: Boolean, default: false },
+    deletedAt: { type: Date },
+  deletedBy: { type: Types.ObjectId, ref: 'User' },
+  deletedForUsers: [{ type: Types.ObjectId, ref: 'User' }],
   createdAt: { type: Date, default: Date.now }
 });
 MessageSchema.index({ conversationId: 1, createdAt: -1 });
@@ -445,21 +450,30 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
   socket.on('authenticate', async (data) => {
-    try {
-      const { token } = data;
-      const decoded = jwt.verify(token, JWT_SECRET);
-      socket.userId = decoded.sub;
-      socket.role = decoded.role;
-      
-      connectedUsers.set(socket.userId, socket.id);
-      socket.join(socket.userId);
-      
-      console.log(`User ${socket.userId} authenticated`);
-      socket.emit('authenticated', { success: true });
-    } catch (error) {
-      socket.emit('auth_error', { error: 'Invalid token' });
-    }
-  });
+  try {
+    const { token } = data;
+    const decoded = jwt.verify(token, JWT_SECRET);
+    socket.userId = decoded.sub;
+    socket.role = decoded.role;
+    
+    connectedUsers.set(socket.userId, socket.id);
+    socket.join(socket.userId);
+    
+    // Mark user as online
+    await User.findByIdAndUpdate(socket.userId, {
+      isOnline: true,
+      lastSeen: new Date()
+    });
+    
+    // Notify others that user is online
+    io.emit('user_online', { userId: socket.userId });
+    
+    console.log(`User ${socket.userId} authenticated and online`);
+    socket.emit('authenticated', { success: true });
+  } catch (error) {
+    socket.emit('auth_error', { error: 'Invalid token' });
+  }
+});
 
   socket.on('join_conversation', (conversationId) => {
     socket.join(`conversation_${conversationId}`);
@@ -568,6 +582,30 @@ io.on('connection', (socket) => {
     }
   });
 
+    socket.on('user_online', async () => {
+    if (socket.userId) {
+      await User.findByIdAndUpdate(socket.userId, {
+        isOnline: true,
+        lastSeen: new Date()
+      });
+      io.emit('user_online', { userId: socket.userId });
+    }
+  });
+
+  socket.on('user_offline', async () => {
+    if (socket.userId) {
+      const lastSeen = new Date();
+      await User.findByIdAndUpdate(socket.userId, {
+        isOnline: false,
+        lastSeen: lastSeen
+      });
+      io.emit('user_offline', { 
+        userId: socket.userId,
+        lastSeen: lastSeen.toISOString()
+      });
+    }
+  });
+
   socket.on('typing', (data) => {
     const { conversationId, receiverId } = data;
     io.to(receiverId).emit('user_typing', { 
@@ -589,12 +627,25 @@ io.on('connection', (socket) => {
     console.log(`User ${userId} joined their room`);
   });
 
-  socket.on('disconnect', () => {
-    if (socket.userId) {
-      connectedUsers.delete(socket.userId);
-      console.log(`User ${socket.userId} disconnected`);
-    }
-  });
+  socket.on('disconnect', async () => {
+  if (socket.userId) {
+    connectedUsers.delete(socket.userId);
+    
+    // Mark user as offline
+    const lastSeen = new Date();
+    await User.findByIdAndUpdate(socket.userId, {
+      isOnline: false,
+      lastSeen: lastSeen
+    });
+    
+    // Notify others user is offline
+    io.emit('user_offline', { 
+      userId: socket.userId,
+      lastSeen: lastSeen.toISOString()
+    });
+    
+    console.log(`User ${socket.userId} disconnected and marked offline`);
+  }
 });
 
 // ========= ROOT & HEALTH ENDPOINTS =========
@@ -2939,6 +2990,81 @@ app.get('/api/teacher/rankings', authRequired, requireRole('TEACHER'), async (re
 // Before: app.use('*', (req, res) => {
 // ADD ALL THESE ENDPOINTS:
 
+  // ========= DELETE MESSAGE ENDPOINTS =========
+
+// DELETE /api/chat/messages/:id - Delete a message
+app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    const { deleteForEveryone } = req.body;
+    const userId = req.userId;
+    
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    
+    if (deleteForEveryone) {
+      if (message.senderId.toString() !== userId) {
+        return res.status(403).json({ error: 'You can only delete your own messages for everyone' });
+      }
+      
+      message.deleted = true;
+      message.deletedAt = new Date();
+      message.deletedBy = userId;
+      await message.save();
+      
+      io.to(`conversation_${message.conversationId}`).emit('message_deleted', {
+        messageId: messageId,
+        deletedForEveryone: true
+      });
+      
+      res.json({ success: true, message: 'Message deleted for everyone' });
+    } else {
+      if (!message.deletedForUsers) {
+        message.deletedForUsers = [];
+      }
+      
+      if (!message.deletedForUsers.includes(userId)) {
+        message.deletedForUsers.push(userId);
+        await message.save();
+      }
+      
+      res.json({ success: true, message: 'Message deleted' });
+    }
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
+  }
+});
+
+// DELETE /api/chat/conversations/:id/messages - Delete all messages
+app.delete('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const userId = req.userId;
+    
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    await Message.updateMany(
+      { conversationId: conversationId },
+      { $addToSet: { deletedForUsers: userId } }
+    );
+    
+    res.json({ success: true, message: 'All messages deleted' });
+  } catch (error) {
+    console.error('Delete all messages error:', error);
+    res.status(500).json({ error: 'Failed to delete messages' });
+  }
+});
+
 // ========= CHAT REST API ENDPOINTS =========
 
 app.get('/api/chat/conversations', authRequired, async (req, res) => {
@@ -2954,8 +3080,8 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
     }
     
     const conversations = await Conversation.find(query)
-      .populate('teacherId', 'name avatar email')
-      .populate('studentId', 'name avatar email studentCode')
+      .populate('teacherId', 'name avatar email isOnline lastSeen')
+.populate('studentId', 'name avatar email studentCode isOnline lastSeen')
       .populate('lastMessageSenderId', 'name role')
       .sort({ lastMessageAt: -1 })
       .lean();
@@ -2976,16 +3102,20 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
         studentCode: conv.studentId.studentCode
       },
       otherUser: role === 'TEACHER' ? {
-        id: conv.studentId._id.toString(),
-        name: conv.studentId.name,
-        avatar: conv.studentId.avatar,
-        role: 'STUDENT'
-      } : {
-        id: conv.teacherId._id.toString(),
-        name: conv.teacherId.name,
-        avatar: conv.teacherId.avatar,
-        role: 'TEACHER'
-      },
+  id: conv.studentId._id.toString(),
+  name: conv.studentId.name,
+  avatar: conv.studentId.avatar,
+  role: 'STUDENT',
+  isOnline: conv.studentId.isOnline || false,
+  lastSeen: conv.studentId.lastSeen ? conv.studentId.lastSeen.toISOString() : null
+} : {
+  id: conv.teacherId._id.toString(),
+  name: conv.teacherId.name,
+  avatar: conv.teacherId.avatar,
+  role: 'TEACHER',
+  isOnline: conv.teacherId.isOnline || false,
+  lastSeen: conv.teacherId.lastSeen ? conv.teacherId.lastSeen.toISOString() : null
+},
       lastMessage: conv.lastMessage,
       lastMessageAt: conv.lastMessageAt,
       lastMessageSender: conv.lastMessageSenderId?.name,
@@ -3098,11 +3228,11 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
     }
     
     const messages = await Message.find({
-      conversationId,
-      deleted: false
-    })
-      .populate('senderId', 'name avatar role')
-      .populate('receiverId', 'name avatar role')
+  conversationId: conversationId,
+  deletedForUsers: { $ne: userId }  // ← This line
+})
+      .populate('senderId', 'name avatar role isOnline lastSeen')
+.populate('receiverId', 'name avatar role isOnline lastSeen')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit))
@@ -3112,17 +3242,22 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
       id: msg._id.toString(),
       conversationId: msg.conversationId.toString(),
       sender: {
-        id: msg.senderId._id.toString(),
-        name: msg.senderId.name,
-        avatar: msg.senderId.avatar,
-        role: msg.senderId.role
-      },
-      receiver: {
-        id: msg.receiverId._id.toString(),
-        name: msg.receiverId.name,
-        avatar: msg.receiverId.avatar,
-        role: msg.receiverId.role
-      },
+  id: msg.senderId._id.toString(),
+  name: msg.senderId.name,
+  avatar: msg.senderId.avatar,
+  role: msg.senderId.role,
+  isOnline: msg.senderId.isOnline || false,
+  lastSeen: msg.senderId.lastSeen ? msg.senderId.lastSeen.toISOString() : null
+},
+receiver: {
+  id: msg.receiverId._id.toString(),
+  name: msg.receiverId.name,
+  avatar: msg.receiverId.avatar,
+  role: msg.receiverId.role,
+  isOnline: msg.receiverId.isOnline || false,
+  lastSeen: msg.receiverId.lastSeen ? msg.receiverId.lastSeen.toISOString() : null
+},
+      deleted: msg.deleted || false,
       content: msg.content,
       type: msg.type,
       fileUrl: msg.fileUrl,
