@@ -10,6 +10,12 @@ const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
 const http = require('http');
 const socketIo = require('socket.io');
+// After: const socketIo = require('socket.io');
+// ADD THESE NEW DEPENDENCIES:
+
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -41,6 +47,42 @@ const limiter = rateLimit({
   trustProxy: 1
 });
 app.use('/api/', limiter);
+
+// After: app.use('/api/', limiter);
+// ADD THIS ENTIRE SECTION:
+
+// ========= CHAT & FILE UPLOAD SETUP =========
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|xls|xlsx|txt|zip/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error('Invalid file type'));
+  }
+});
+
+app.use('/uploads', express.static(uploadDir));
 
 // ========= CONFIG =========
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/tuitionmanager';
@@ -227,7 +269,7 @@ AttendanceSchema.index({ teacherId: 1, classId: 1, date: 1 }, { unique: true });
 // Notification Schema
 const NotificationSchema = new Schema({
   userId: { type: Types.ObjectId, ref: 'User', required: true },
-  type: { type: String, enum: ['ASSIGNMENT', 'EXAM', 'ATTENDANCE', 'RESULT', 'CLASS', 'SYSTEM'], required: true },
+  type: { type: String, enum: ['ASSIGNMENT', 'EXAM', 'ATTENDANCE', 'RESULT', 'CLASS', 'SYSTEM', 'CHAT'], required: true },
   title: { type: String, required: true },
   message: { type: String, required: true },
   data: { type: Schema.Types.Mixed },
@@ -355,8 +397,145 @@ const requireRole = (role) => (req, res, next) => {
 };
 
 // ========= SOCKET.IO FOR REAL-TIME =========
+// ========= ENHANCED SOCKET.IO FOR CHAT =========
+const connectedUsers = new Map(); // userId -> socketId
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
+
+  socket.on('authenticate', async (data) => {
+    try {
+      const { token } = data;
+      const decoded = jwt.verify(token, JWT_SECRET);
+      socket.userId = decoded.sub;
+      socket.role = decoded.role;
+      
+      connectedUsers.set(socket.userId, socket.id);
+      socket.join(socket.userId);
+      
+      console.log(`User ${socket.userId} authenticated`);
+      socket.emit('authenticated', { success: true });
+    } catch (error) {
+      socket.emit('auth_error', { error: 'Invalid token' });
+    }
+  });
+
+  socket.on('join_conversation', (conversationId) => {
+    socket.join(`conversation_${conversationId}`);
+    console.log(`Socket joined conversation ${conversationId}`);
+  });
+
+  socket.on('leave_conversation', (conversationId) => {
+    socket.leave(`conversation_${conversationId}`);
+  });
+
+  socket.on('send_message', async (data) => {
+    try {
+      const { conversationId, receiverId, content, type, iv } = data;
+      
+      if (!socket.userId) {
+        socket.emit('message_error', { error: 'Not authenticated' });
+        return;
+      }
+
+      const message = await Message.create({
+        conversationId,
+        senderId: socket.userId,
+        receiverId,
+        content,
+        type: type || 'TEXT',
+        iv,
+        delivered: false,
+        read: false
+      });
+
+      await Conversation.findByIdAndUpdate(conversationId, {
+        lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type.toLowerCase()}`,
+        lastMessageAt: new Date(),
+        lastMessageSenderId: socket.userId,
+        $inc: {
+          unreadCountTeacher: socket.role === 'STUDENT' ? 1 : 0,
+          unreadCountStudent: socket.role === 'TEACHER' ? 1 : 0
+        }
+      });
+
+      const populatedMessage = await Message.findById(message._id)
+        .populate('senderId', 'name avatar role')
+        .lean();
+
+      io.to(`conversation_${conversationId}`).emit('new_message', {
+        ...populatedMessage,
+        id: populatedMessage._id.toString()
+      });
+
+      if (connectedUsers.has(receiverId.toString())) {
+        message.delivered = true;
+        message.deliveredAt = new Date();
+        await message.save();
+        
+        io.to(`conversation_${conversationId}`).emit('message_delivered', {
+          messageId: message._id.toString()
+        });
+      }
+
+      await createNotification(
+        receiverId,
+        'CHAT',
+        'New Message',
+        `${socket.role === 'TEACHER' ? 'Your teacher' : 'Your student'} sent you a message`,
+        { conversationId, messageId: message._id }
+      );
+
+      socket.emit('message_sent', { 
+        messageId: message._id.toString(),
+        tempId: data.tempId 
+      });
+    } catch (error) {
+      console.error('Send message error:', error);
+      socket.emit('message_error', { error: 'Failed to send message' });
+    }
+  });
+
+  socket.on('mark_read', async (data) => {
+    try {
+      const { messageId, conversationId } = data;
+      
+      await Message.findByIdAndUpdate(messageId, {
+        read: true,
+        readAt: new Date()
+      });
+
+      if (socket.role === 'TEACHER') {
+        await Conversation.findByIdAndUpdate(conversationId, {
+          unreadCountTeacher: 0
+        });
+      } else {
+        await Conversation.findByIdAndUpdate(conversationId, {
+          unreadCountStudent: 0
+        });
+      }
+
+      io.to(`conversation_${conversationId}`).emit('message_read', { messageId });
+    } catch (error) {
+      console.error('Mark read error:', error);
+    }
+  });
+
+  socket.on('typing', (data) => {
+    const { conversationId, receiverId } = data;
+    io.to(receiverId).emit('user_typing', { 
+      conversationId, 
+      userId: socket.userId 
+    });
+  });
+
+  socket.on('stop_typing', (data) => {
+    const { conversationId, receiverId } = data;
+    io.to(receiverId).emit('user_stop_typing', { 
+      conversationId, 
+      userId: socket.userId 
+    });
+  });
 
   socket.on('join_user', (userId) => {
     socket.join(userId);
@@ -364,7 +543,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    if (socket.userId) {
+      connectedUsers.delete(socket.userId);
+      console.log(`User ${socket.userId} disconnected`);
+    }
   });
 });
 
@@ -2704,6 +2886,307 @@ app.get('/api/teacher/rankings', authRequired, requireRole('TEACHER'), async (re
   } catch (error) {
     console.error('Get teacher rankings error:', error);
     res.status(500).json({ error: 'Failed to fetch rankings' });
+  }
+});
+
+// Before: app.use('*', (req, res) => {
+// ADD ALL THESE ENDPOINTS:
+
+// ========= CHAT REST API ENDPOINTS =========
+
+app.get('/api/chat/conversations', authRequired, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const role = req.role;
+    
+    let query = {};
+    if (role === 'TEACHER') {
+      query.teacherId = userId;
+    } else {
+      query.studentId = userId;
+    }
+    
+    const conversations = await Conversation.find(query)
+      .populate('teacherId', 'name avatar email')
+      .populate('studentId', 'name avatar email studentCode')
+      .populate('lastMessageSenderId', 'name role')
+      .sort({ lastMessageAt: -1 })
+      .lean();
+    
+    const formatted = conversations.map(conv => ({
+      id: conv._id.toString(),
+      teacher: {
+        id: conv.teacherId._id.toString(),
+        name: conv.teacherId.name,
+        avatar: conv.teacherId.avatar,
+        email: conv.teacherId.email
+      },
+      student: {
+        id: conv.studentId._id.toString(),
+        name: conv.studentId.name,
+        avatar: conv.studentId.avatar,
+        email: conv.studentId.email,
+        studentCode: conv.studentId.studentCode
+      },
+      otherUser: role === 'TEACHER' ? {
+        id: conv.studentId._id.toString(),
+        name: conv.studentId.name,
+        avatar: conv.studentId.avatar,
+        role: 'STUDENT'
+      } : {
+        id: conv.teacherId._id.toString(),
+        name: conv.teacherId.name,
+        avatar: conv.teacherId.avatar,
+        role: 'TEACHER'
+      },
+      lastMessage: conv.lastMessage,
+      lastMessageAt: conv.lastMessageAt,
+      lastMessageSender: conv.lastMessageSenderId?.name,
+      unreadCount: role === 'TEACHER' ? conv.unreadCountTeacher : conv.unreadCountStudent,
+      createdAt: conv.createdAt
+    }));
+    
+    res.json({ success: true, conversations: formatted });
+  } catch (error) {
+    console.error('Get conversations error:', error);
+    res.status(500).json({ error: 'Failed to fetch conversations' });
+  }
+});
+
+app.post('/api/chat/conversations', authRequired, async (req, res) => {
+  try {
+    const { otherUserId } = req.body;
+    
+    if (!otherUserId) {
+      return res.status(400).json({ error: 'Other user ID is required' });
+    }
+    
+    const otherUser = await User.findById(otherUserId);
+    if (!otherUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    let teacherId, studentId;
+    if (req.role === 'TEACHER') {
+      teacherId = req.userId;
+      studentId = otherUserId;
+      
+      const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: 'Not linked to this student' });
+      }
+    } else {
+      studentId = req.userId;
+      teacherId = otherUserId;
+      
+      const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
+      if (!isLinked) {
+        return res.status(403).json({ error: 'Not linked to this teacher' });
+      }
+    }
+    
+    let conversation = await Conversation.findOne({ teacherId, studentId });
+    
+    if (!conversation) {
+      conversation = await Conversation.create({
+        teacherId,
+        studentId,
+        lastMessageAt: new Date()
+      });
+    }
+    
+    const populated = await Conversation.findById(conversation._id)
+      .populate('teacherId', 'name avatar email')
+      .populate('studentId', 'name avatar email studentCode')
+      .lean();
+    
+    res.json({
+      success: true,
+      conversation: {
+        id: populated._id.toString(),
+        teacher: {
+          id: populated.teacherId._id.toString(),
+          name: populated.teacherId.name,
+          avatar: populated.teacherId.avatar
+        },
+        student: {
+          id: populated.studentId._id.toString(),
+          name: populated.studentId.name,
+          avatar: populated.studentId.avatar,
+          studentCode: populated.studentId.studentCode
+        },
+        otherUser: req.role === 'TEACHER' ? {
+          id: populated.studentId._id.toString(),
+          name: populated.studentId.name,
+          avatar: populated.studentId.avatar,
+          role: 'STUDENT'
+        } : {
+          id: populated.teacherId._id.toString(),
+          name: populated.teacherId.name,
+          avatar: populated.teacherId.avatar,
+          role: 'TEACHER'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Create conversation error:', error);
+    res.status(500).json({ error: 'Failed to create conversation' });
+  }
+});
+
+app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const { page = 1, limit = 50 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    const userId = req.userId;
+    if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const messages = await Message.find({
+      conversationId,
+      deleted: false
+    })
+      .populate('senderId', 'name avatar role')
+      .populate('receiverId', 'name avatar role')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+    
+    const formatted = messages.map(msg => ({
+      id: msg._id.toString(),
+      conversationId: msg.conversationId.toString(),
+      sender: {
+        id: msg.senderId._id.toString(),
+        name: msg.senderId.name,
+        avatar: msg.senderId.avatar,
+        role: msg.senderId.role
+      },
+      receiver: {
+        id: msg.receiverId._id.toString(),
+        name: msg.receiverId.name,
+        avatar: msg.receiverId.avatar,
+        role: msg.receiverId.role
+      },
+      content: msg.content,
+      type: msg.type,
+      fileUrl: msg.fileUrl,
+      fileName: msg.fileName,
+      fileSize: msg.fileSize,
+      mimeType: msg.mimeType,
+      iv: msg.iv,
+      delivered: msg.delivered,
+      deliveredAt: msg.deliveredAt,
+      read: msg.read,
+      readAt: msg.readAt,
+      createdAt: msg.createdAt,
+      isMine: msg.senderId._id.toString() === userId
+    })).reverse();
+    
+    res.json({ success: true, messages: formatted });
+  } catch (error) {
+    console.error('Get messages error:', error);
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+app.post('/api/chat/upload', authRequired, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+    
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    
+    res.json({
+      success: true,
+      file: {
+        url: fileUrl,
+        filename: req.file.originalname,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+        type: req.file.mimetype.startsWith('image/') ? 'IMAGE' : 
+              req.file.mimetype === 'application/pdf' ? 'PDF' : 'FILE'
+      }
+    });
+  } catch (error) {
+    console.error('File upload error:', error);
+    res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+app.patch('/api/chat/conversations/:id/read', authRequired, async (req, res) => {
+  try {
+    const conversationId = req.params.id;
+    const userId = req.userId;
+    const role = req.role;
+    
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ error: 'Conversation not found' });
+    }
+    
+    if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    await Message.updateMany(
+      {
+        conversationId,
+        receiverId: userId,
+        read: false
+      },
+      {
+        read: true,
+        readAt: new Date()
+      }
+    );
+    
+    const updateField = role === 'TEACHER' ? 'unreadCountTeacher' : 'unreadCountStudent';
+    await Conversation.findByIdAndUpdate(conversationId, {
+      [updateField]: 0
+    });
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Mark conversation read error:', error);
+    res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
+app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
+  try {
+    const messageId = req.params.id;
+    const userId = req.userId;
+    
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    
+    if (message.senderId.toString() !== userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    message.deleted = true;
+    await message.save();
+    
+    io.to(`conversation_${message.conversationId}`).emit('message_deleted', {
+      messageId: messageId
+    });
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.status(500).json({ error: 'Failed to delete message' });
   }
 });
 
