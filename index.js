@@ -407,6 +407,41 @@ const createNotification = async (userId, type, title, message, data = {}) => {
   }
 };
 
+// ========= WEBRTC HELPER FUNCTION =========
+async function checkCallAuthorization(callerId, receiverId) {
+  try {
+    const caller = await User.findById(callerId);
+    const receiver = await User.findById(receiverId);
+    
+    if (!caller || !receiver) return false;
+    
+    // Teacher calling student
+    if (caller.role === 'TEACHER' && receiver.role === 'STUDENT') {
+      const link = await TeacherStudentLink.findOne({
+        teacherId: callerId,
+        studentId: receiverId,
+        isActive: true
+      });
+      return !!link;
+    }
+    
+    // Student calling teacher
+    if (caller.role === 'STUDENT' && receiver.role === 'TEACHER') {
+      const link = await TeacherStudentLink.findOne({
+        teacherId: receiverId,
+        studentId: callerId,
+        isActive: true
+      });
+      return !!link;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Authorization check error:', error);
+    return false;
+  }
+}
+
 // ========= AUTH MIDDLEWARE =========
 const authRequired = (req, res, next) => {
   try {
@@ -438,6 +473,7 @@ const requireRole = (role) => (req, res, next) => {
 // ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
 const activeCalls = new Map(); // Track active calls
+const onlineUsers = new Map(); // For WebRTC calls
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
@@ -477,6 +513,7 @@ io.on('connection', (socket) => {
       }
       
       connectedUsers.set(socket.userId, socket.id);
+      onlineUsers.set(socket.userId, socket.id); // For WebRTC
       socket.join(socket.userId);
       
       await User.findByIdAndUpdate(socket.userId, {
@@ -702,6 +739,108 @@ io.on('connection', (socket) => {
   // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
   socket.on('call-user', async (data) => {
     try {
+      const { receiverId, callType, offer } = data;
+      const callerId = socket.userId;
+      
+      if (!callerId || !receiverId) {
+        socket.emit('call-error', { error: 'Invalid call data' });
+        return;
+      }
+      
+      // Check authorization (teacher-student link)
+      const isAuthorized = await checkCallAuthorization(callerId, receiverId);
+      if (!isAuthorized) {
+        socket.emit('call-error', { error: 'Not authorized' });
+        return;
+      }
+      
+      // Get caller info
+      const caller = await User.findById(callerId).select('name avatar');
+      
+      // Find receiver's socket
+      const receiverSocketId = onlineUsers.get(receiverId);
+      if (!receiverSocketId) {
+        socket.emit('call-error', { error: 'User offline' });
+        return;
+      }
+      
+      // Send call notification to receiver
+      io.to(receiverSocketId).emit('call-made', {
+        callerId: callerId,
+        callerName: caller.name,
+        callerAvatar: caller.avatar,
+        callType: callType,
+        offer: offer
+      });
+      
+      // Notify caller that call is ringing
+      socket.emit('call-ringing');
+      
+    } catch (error) {
+      console.error('Call user error:', error);
+      socket.emit('call-error', { error: 'Failed to initiate call' });
+    }
+  });
+  
+  // Answer call
+  socket.on('answer-call', async (data) => {
+    try {
+      const { callerId, answer } = data;
+      const callerSocketId = onlineUsers.get(callerId);
+      
+      if (callerSocketId) {
+        io.to(callerSocketId).emit('call-answered', { answer });
+      }
+    } catch (error) {
+      console.error('Answer call error:', error);
+    }
+  });
+  
+  // Reject call
+  socket.on('reject-call', async (data) => {
+    try {
+      const { callerId } = data;
+      const callerSocketId = onlineUsers.get(callerId);
+      
+      if (callerSocketId) {
+        io.to(callerSocketId).emit('call-rejected');
+      }
+    } catch (error) {
+      console.error('Reject call error:', error);
+    }
+  });
+  
+  // End call
+  socket.on('end-call', async (data) => {
+    try {
+      const { targetUserId } = data;
+      const targetSocketId = onlineUsers.get(targetUserId);
+      
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call-ended');
+      }
+    } catch (error) {
+      console.error('End call error:', error);
+    }
+  });
+  
+  // ICE candidate exchange
+  socket.on('ice-candidate', async (data) => {
+    try {
+      const { targetUserId, candidate } = data;
+      const targetSocketId = onlineUsers.get(targetUserId);
+      
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('ice-candidate', { candidate });
+      }
+    } catch (error) {
+      console.error('ICE candidate error:', error);
+    }
+  });
+
+  // Original WebRTC handlers (keeping for compatibility)
+  socket.on('call-user', async (data) => {
+    try {
       const { receiverId, offer, callType } = data;
       if (!socket.userId || !receiverId || !offer) {
         socket.emit('call-error', { error: 'Invalid call request' });
@@ -823,6 +962,7 @@ io.on('connection', (socket) => {
     
     if (socket.userId) {
       connectedUsers.delete(socket.userId);
+      onlineUsers.delete(socket.userId);
       const lastSeen = new Date();
       await User.findByIdAndUpdate(socket.userId, {
         isOnline: false,
