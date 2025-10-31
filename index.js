@@ -410,10 +410,18 @@ const createNotification = async (userId, type, title, message, data = {}) => {
 // ========= WEBRTC HELPER FUNCTION =========
 async function checkCallAuthorization(callerId, receiverId) {
   try {
+    console.log(`🔍 Authorization check: Caller=${callerId}, Receiver=${receiverId}`);
+    
     const caller = await User.findById(callerId);
     const receiver = await User.findById(receiverId);
     
-    if (!caller || !receiver) return false;
+    console.log(`👤 Caller: ${caller?.name} (${caller?.role})`);
+    console.log(`👤 Receiver: ${receiver?.name} (${receiver?.role})`);
+    
+    if (!caller || !receiver) {
+      console.log('❌ User not found');
+      return false;
+    }
     
     // Teacher calling student
     if (caller.role === 'TEACHER' && receiver.role === 'STUDENT') {
@@ -422,6 +430,7 @@ async function checkCallAuthorization(callerId, receiverId) {
         studentId: receiverId,
         isActive: true
       });
+      console.log(`🔗 Teacher→Student link: ${link ? 'FOUND' : 'NOT FOUND'}`);
       return !!link;
     }
     
@@ -432,12 +441,14 @@ async function checkCallAuthorization(callerId, receiverId) {
         studentId: callerId,
         isActive: true
       });
+      console.log(`🔗 Student→Teacher link: ${link ? 'FOUND' : 'NOT FOUND'}`);
       return !!link;
     }
     
+    console.log('❌ Invalid role combination');
     return false;
   } catch (error) {
-    console.error('Authorization check error:', error);
+    console.error('❌ Authorization check error:', error);
     return false;
   }
 }
