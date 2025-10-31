@@ -437,6 +437,7 @@ const requireRole = (role) => (req, res, next) => {
 
 // ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
+const activeCalls = new Map(); // Track active calls
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
@@ -698,8 +699,127 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
+  socket.on('call-user', async (data) => {
+    try {
+      const { receiverId, offer, callType } = data;
+      if (!socket.userId || !receiverId || !offer) {
+        socket.emit('call-error', { error: 'Invalid call request' });
+        return;
+      }
+
+      const receiverSocketId = connectedUsers.get(receiverId.toString());
+      if (!receiverSocketId) {
+        socket.emit('call-error', { error: 'User offline' });
+        return;
+      }
+
+      const caller = await User.findById(socket.userId);
+      const receiver = await User.findById(receiverId);
+      
+      let isLinked = caller.role === 'TEACHER' 
+        ? await ensureTeacherOwnsStudent(socket.userId, receiverId)
+        : await ensureTeacherOwnsStudent(receiverId, socket.userId);
+
+      if (!isLinked) {
+        socket.emit('call-error', { error: 'Not authorized' });
+        return;
+      }
+
+      if (activeCalls.has(receiverId.toString())) {
+        socket.emit('call-error', { error: 'User busy' });
+        return;
+      }
+
+      activeCalls.set(socket.userId, receiverId.toString());
+      activeCalls.set(receiverId.toString(), socket.userId);
+
+      console.log(`📞 Call: ${caller.name} → ${receiver.name} [${callType}]`);
+
+      io.to(receiverSocketId).emit('call-made', {
+        callerId: socket.userId,
+        callerName: caller.name,
+        callerAvatar: caller.avatar,
+        offer: offer,
+        callType: callType || 'audio'
+      });
+
+      socket.emit('call-ringing', { receiverId });
+    } catch (error) {
+      socket.emit('call-error', { error: 'Call failed' });
+    }
+  });
+
+  socket.on('answer-call', async (data) => {
+    const { callerId, answer } = data;
+    if (!socket.userId || !callerId || !answer) return;
+    
+    const callerSocketId = connectedUsers.get(callerId.toString());
+    if (callerSocketId) {
+      io.to(callerSocketId).emit('call-answered', {
+        receiverId: socket.userId,
+        answer: answer
+      });
+    }
+  });
+
+  socket.on('ice-candidate', (data) => {
+    const { targetUserId, candidate } = data;
+    if (!targetUserId || !candidate) return;
+    
+    const targetSocketId = connectedUsers.get(targetUserId.toString());
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('ice-candidate', {
+        senderId: socket.userId,
+        candidate: candidate
+      });
+    }
+  });
+
+  socket.on('end-call', (data) => {
+    const { targetUserId } = data;
+    const otherUserId = activeCalls.get(socket.userId);
+    
+    if (otherUserId) {
+      activeCalls.delete(socket.userId);
+      activeCalls.delete(otherUserId);
+      
+      const otherSocketId = connectedUsers.get(otherUserId);
+      if (otherSocketId) {
+        io.to(otherSocketId).emit('call-ended', { userId: socket.userId });
+      }
+    }
+    
+    if (targetUserId) activeCalls.delete(targetUserId.toString());
+    socket.emit('call-end-confirmed');
+  });
+
+  socket.on('reject-call', (data) => {
+    const { callerId } = data;
+    activeCalls.delete(socket.userId);
+    activeCalls.delete(callerId?.toString());
+    
+    const callerSocketId = connectedUsers.get(callerId?.toString());
+    if (callerSocketId) {
+      io.to(callerSocketId).emit('call-rejected', { userId: socket.userId });
+    }
+  });
+
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
+    
+    // Handle active calls on disconnect
+    if (socket.userId && activeCalls.has(socket.userId)) {
+      const otherUserId = activeCalls.get(socket.userId);
+      activeCalls.delete(socket.userId);
+      if (otherUserId) {
+        activeCalls.delete(otherUserId);
+        const otherSocketId = connectedUsers.get(otherUserId);
+        if (otherSocketId) {
+          io.to(otherSocketId).emit('call-ended', { userId: socket.userId, reason: 'disconnected' });
+        }
+      }
+    }
     
     if (socket.userId) {
       connectedUsers.delete(socket.userId);
@@ -2944,15 +3064,15 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
     
     // Create and save the message
     const message = new Message({
-  conversationId: conversation._id,
-  senderId: senderId,           // ✅ Sender
-  receiverId: receiverId,       // ✅ Add this line!
-  content: content,
-  type: type,
-  createdAt: new Date(),
-  delivered: false,
-  read: false
-});
+      conversationId: conversation._id,
+      senderId: senderId,           // ✅ Sender
+      receiverId: receiverId,       // ✅ Add this line!
+      content: content,
+      type: type,
+      createdAt: new Date(),
+      delivered: false,
+      read: false
+    });
     
     await message.save();
     
@@ -3002,128 +3122,6 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
     });
   }
 });
-
-// ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
-const activeCalls = new Map(); // Track active calls
-
-socket.on('call-user', async (data) => {
-  try {
-    const { receiverId, offer, callType } = data;
-    if (!socket.userId || !receiverId || !offer) {
-      socket.emit('call-error', { error: 'Invalid call request' });
-      return;
-    }
-
-    const receiverSocketId = connectedUsers.get(receiverId.toString());
-    if (!receiverSocketId) {
-      socket.emit('call-error', { error: 'User offline' });
-      return;
-    }
-
-    const caller = await User.findById(socket.userId);
-    const receiver = await User.findById(receiverId);
-    
-    let isLinked = caller.role === 'TEACHER' 
-      ? await ensureTeacherOwnsStudent(socket.userId, receiverId)
-      : await ensureTeacherOwnsStudent(receiverId, socket.userId);
-
-    if (!isLinked) {
-      socket.emit('call-error', { error: 'Not authorized' });
-      return;
-    }
-
-    if (activeCalls.has(receiverId.toString())) {
-      socket.emit('call-error', { error: 'User busy' });
-      return;
-    }
-
-    activeCalls.set(socket.userId, receiverId.toString());
-    activeCalls.set(receiverId.toString(), socket.userId);
-
-    console.log(`📞 Call: ${caller.name} → ${receiver.name} [${callType}]`);
-
-    io.to(receiverSocketId).emit('call-made', {
-      callerId: socket.userId,
-      callerName: caller.name,
-      callerAvatar: caller.avatar,
-      offer: offer,
-      callType: callType || 'audio'
-    });
-
-    socket.emit('call-ringing', { receiverId });
-  } catch (error) {
-    socket.emit('call-error', { error: 'Call failed' });
-  }
-});
-
-socket.on('answer-call', async (data) => {
-  const { callerId, answer } = data;
-  if (!socket.userId || !callerId || !answer) return;
-  
-  const callerSocketId = connectedUsers.get(callerId.toString());
-  if (callerSocketId) {
-    io.to(callerSocketId).emit('call-answered', {
-      receiverId: socket.userId,
-      answer: answer
-    });
-  }
-});
-
-socket.on('ice-candidate', (data) => {
-  const { targetUserId, candidate } = data;
-  if (!targetUserId || !candidate) return;
-  
-  const targetSocketId = connectedUsers.get(targetUserId.toString());
-  if (targetSocketId) {
-    io.to(targetSocketId).emit('ice-candidate', {
-      senderId: socket.userId,
-      candidate: candidate
-    });
-  }
-});
-
-socket.on('end-call', (data) => {
-  const { targetUserId } = data;
-  const otherUserId = activeCalls.get(socket.userId);
-  
-  if (otherUserId) {
-    activeCalls.delete(socket.userId);
-    activeCalls.delete(otherUserId);
-    
-    const otherSocketId = connectedUsers.get(otherUserId);
-    if (otherSocketId) {
-      io.to(otherSocketId).emit('call-ended', { userId: socket.userId });
-    }
-  }
-  
-  if (targetUserId) activeCalls.delete(targetUserId.toString());
-  socket.emit('call-end-confirmed');
-});
-
-socket.on('reject-call', (data) => {
-  const { callerId } = data;
-  activeCalls.delete(socket.userId);
-  activeCalls.delete(callerId?.toString());
-  
-  const callerSocketId = connectedUsers.get(callerId?.toString());
-  if (callerSocketId) {
-    io.to(callerSocketId).emit('call-rejected', { userId: socket.userId });
-  }
-});
-
-// Add to existing disconnect handler:
-// Inside socket.on('disconnect'), add this at the beginning:
-if (socket.userId && activeCalls.has(socket.userId)) {
-  const otherUserId = activeCalls.get(socket.userId);
-  activeCalls.delete(socket.userId);
-  if (otherUserId) {
-    activeCalls.delete(otherUserId);
-    const otherSocketId = connectedUsers.get(otherUserId);
-    if (otherSocketId) {
-      io.to(otherSocketId).emit('call-ended', { userId: socket.userId, reason: 'disconnected' });
-    }
-  }
-}
 
 // ========= CATCH-ALL ROUTE =========
 app.use('*', (req, res) => {
