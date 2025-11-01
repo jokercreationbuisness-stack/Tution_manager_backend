@@ -2793,6 +2793,7 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
     .limit(parseInt(limit))
     .lean();
     
+    // ✅ FIXED: Include replyTo in response
     const formatted = messages.map(msg => ({
       id: msg._id.toString(),
       content: msg.content,
@@ -2806,6 +2807,7 @@ app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) =
         avatar: msg.senderId.avatar,
         role: msg.senderId.role
       },
+      replyTo: msg.replyTo || null,  // ← ADD THIS LINE
       delivered: msg.delivered,
       read: msg.read,
       createdAt: msg.createdAt,
