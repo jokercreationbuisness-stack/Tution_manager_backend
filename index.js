@@ -329,6 +329,13 @@ const MessageSchema = new Schema({
   deletedAt: { type: Date },
   deletedBy: { type: Types.ObjectId, ref: 'User' },
   deletedForUsers: [{ type: Types.ObjectId, ref: 'User' }],
+  replyTo: {
+    messageId: { type: String },
+    content: { type: String },
+    senderId: { type: Types.ObjectId, ref: 'User' },
+    senderName: { type: String },
+    type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF'], default: 'TEXT' }
+  },
   createdAt: { type: Date, default: Date.now }
 });
 MessageSchema.index({ conversationId: 1, createdAt: -1 });
@@ -579,9 +586,9 @@ io.on('connection', (socket) => {
     socket.leave(`conversation_${conversationId}`);
   });
 
-  socket.on('send_message', async (data) => {
+    socket.on('send_message', async (data) => {
     try {
-      const { conversationId, receiverId, content, type, iv, tempId } = data;
+      const { conversationId, receiverId, content, type, iv, tempId, replyTo } = data;
       
       if (!socket.userId) {
         socket.emit('message_error', { error: 'Not authenticated', tempId });
@@ -608,7 +615,8 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const message = await Message.create({
+      // Build message data
+      const messageData = {
         conversationId,
         senderId: socket.userId,
         receiverId,
@@ -617,7 +625,20 @@ io.on('connection', (socket) => {
         iv,
         delivered: false,
         read: false
-      });
+      };
+      
+      // Add replyTo if provided
+      if (replyTo && replyTo.messageId) {
+        messageData.replyTo = {
+          messageId: replyTo.messageId,
+          content: replyTo.content || '',
+          senderId: replyTo.senderId,
+          senderName: replyTo.senderName || 'Unknown',
+          type: replyTo.type || 'TEXT'
+        };
+      }
+
+      const message = await Message.create(messageData);
 
       await Conversation.findByIdAndUpdate(conversationId, {
         lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type?.toLowerCase() || 'file'}`,
@@ -3069,7 +3090,7 @@ app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req,
 // Add this to your backend with your other chat endpoints
 app.post('/api/chat/messages/new', authRequired, async (req, res) => {
   try {
-    const { receiverId, content, type = 'TEXT' } = req.body;
+    const { receiverId, content, type = 'TEXT', replyTo } = req.body;
     const senderId = req.userId;
     const senderRole = req.role;
     
@@ -3107,17 +3128,31 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
       console.log(`Created new conversation: ${conversation._id}`);
     }
     
-    // Create and save the message
-    const message = new Message({
+    // Build message data
+    const messageData = {
       conversationId: conversation._id,
-      senderId: senderId,           // ✅ Sender
-      receiverId: receiverId,       // ✅ Add this line!
+      senderId: senderId,
+      receiverId: receiverId,
       content: content,
       type: type,
       createdAt: new Date(),
       delivered: false,
       read: false
-    });
+    };
+    
+    // Add replyTo if provided
+    if (replyTo && replyTo.messageId) {
+      messageData.replyTo = {
+        messageId: replyTo.messageId,
+        content: replyTo.content || '',
+        senderId: replyTo.senderId,
+        senderName: replyTo.senderName || 'Unknown',
+        type: replyTo.type || 'TEXT'
+      };
+    }
+    
+    // Create and save the message
+    const message = new Message(messageData);
     
     await message.save();
     
