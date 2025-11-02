@@ -434,13 +434,13 @@ const createNotification = async (userId, type, title, message, data = {}) => {
 // ========= WEBRTC HELPER FUNCTION =========
 async function checkCallAuthorization(callerId, receiverId) {
   try {
-    console.log(🔍 Authorization check: Caller=${callerId}, Receiver=${receiverId} );
+    console.log(`🔍 Authorization check: Caller=${callerId}, Receiver=${receiverId}`);
     
     const caller = await User.findById(callerId);
     const receiver = await User.findById(receiverId);
     
-    console.log(👤 Caller: ${caller?.name} (${caller?.role}) );
-    console.log(👤 Receiver: ${receiver?.name} (${receiver?.role}) );
+    console.log(`👤 Caller: ${caller?.name} (${caller?.role})`);
+    console.log(`👤 Receiver: ${receiver?.name} (${receiver?.role})`);
     
     if (!caller || !receiver) {
       console.log('❌ User not found');
@@ -454,7 +454,7 @@ async function checkCallAuthorization(callerId, receiverId) {
         studentId: receiverId,
         isActive: true
       });
-      console.log(🔗 Teacher→Student link: ${link ? 'FOUND' : 'NOT FOUND'} );
+      console.log(`🔗 Teacher→Student link: ${link ? 'FOUND' : 'NOT FOUND'}`);
       return !!link;
     }
     
@@ -465,7 +465,7 @@ async function checkCallAuthorization(callerId, receiverId) {
         studentId: callerId,
         isActive: true
       });
-      console.log(🔗 Student→Teacher link: ${link ? 'FOUND' : 'NOT FOUND'} );
+      console.log(`🔗 Student→Teacher link: ${link ? 'FOUND' : 'NOT FOUND'}`);
       return !!link;
     }
     
@@ -500,52 +500,10 @@ const authRequired = (req, res, next) => {
 
 const requireRole = (role) => (req, res, next) => {
   if (req.role !== role) {
-    return res.status(403).json({ error: Access denied. Requires ${role} role.  });
+    return res.status(403).json({ error: `Access denied. Requires ${role} role.` });
   }
   next();
 };
-
-  // ========= ADD THIS AFTER authenticate HANDLER =========
-  socket.on('request_pending_notifications', async () => {
-    try {
-      const userId = socket.userId;
-      if (!userId) {
-        console.log('❌ No userId - cannot fetch pending notifications');
-        return;
-      }
-      
-      const notifications = await PendingNotification.find({
-        userId: userId,
-        read: false
-      }).sort({ createdAt: -1 }).limit(50);
-      
-      console.log(📬 Found ${notifications.length} pending notifications for user ${userId} );
-      
-      const formattedNotifications = notifications.map(notif => ({
-        type: notif.type,
-        senderName: notif.senderName,
-        senderId: notif.senderId,
-        senderAvatar: notif.senderAvatar,
-        conversationId: notif.conversationId,
-        content: notif.content,
-        callType: notif.callType,
-        createdAt: notif.createdAt
-      }));
-      
-      socket.emit('pending_notifications', {
-        notifications: formattedNotifications
-      });
-      
-      await PendingNotification.updateMany(
-        { userId: userId, read: false },
-        { $set: { read: true } }
-      );
-      
-      console.log(✅ Sent ${notifications.length} pending notifications );
-    } catch (error) {
-      console.error('❌ Error fetching pending notifications:', error);
-    }
-  });
 
 // ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
@@ -633,19 +591,60 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('request_pending_notifications', async () => {
+    try {
+      const userId = socket.userId;
+      if (!userId) {
+        console.log('❌ No userId - cannot fetch pending notifications');
+        return;
+      }
+      
+      const notifications = await PendingNotification.find({
+        userId: userId,
+        read: false
+      }).sort({ createdAt: -1 }).limit(50);
+      
+      console.log(`📬 Found ${notifications.length} pending notifications for user ${userId}`);
+      
+      const formattedNotifications = notifications.map(notif => ({
+        type: notif.type,
+        senderName: notif.senderName,
+        senderId: notif.senderId,
+        senderAvatar: notif.senderAvatar,
+        conversationId: notif.conversationId,
+        content: notif.content,
+        callType: notif.callType,
+        createdAt: notif.createdAt
+      }));
+      
+      socket.emit('pending_notifications', {
+        notifications: formattedNotifications
+      });
+      
+      await PendingNotification.updateMany(
+        { userId: userId, read: false },
+        { $set: { read: true } }
+      );
+      
+      console.log(`✅ Sent ${notifications.length} pending notifications`);
+    } catch (error) {
+      console.error('❌ Error fetching pending notifications:', error);
+    }
+  });
+
   socket.on('join_conversation', (conversationId) => {
     if (!socket.userId) {
       socket.emit('error', { error: 'Authentication required' });
       return;
     }
-    socket.join(conversation_${conversationId} );
+    socket.join(`conversation_${conversationId}`);
   });
 
   socket.on('leave_conversation', (conversationId) => {
-    socket.leave(conversation_${conversationId} );
+    socket.leave(`conversation_${conversationId}`);
   });
 
-    socket.on('send_message', async (data) => {
+  socket.on('send_message', async (data) => {
     try {
       const { conversationId, receiverId, content, type, iv, tempId, replyTo } = data;
       
@@ -700,7 +699,7 @@ io.on('connection', (socket) => {
       const message = await Message.create(messageData);
 
       await Conversation.findByIdAndUpdate(conversationId, {
-        lastMessage: type === 'TEXT' ? content.substring(0, 100) : Sent a ${type?.toLowerCase() || 'file'} ,
+        lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type?.toLowerCase() || 'file'}`,
         lastMessageAt: new Date(),
         lastMessageSenderId: socket.userId,
         $inc: {
@@ -718,7 +717,7 @@ io.on('connection', (socket) => {
         id: populatedMessage._id.toString()
       };
 
-            io.to(conversation_${conversationId} ).emit('new_message', messagePayload);
+      io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
       
       // ========= ADD OFFLINE CHECK =========
       const receiverSocketId = connectedUsers.get(receiverId.toString());
@@ -731,7 +730,7 @@ io.on('connection', (socket) => {
           deliveredAt: new Date()
         });
         
-        io.to(conversation_${conversationId} ).emit('message_delivered', {
+        io.to(`conversation_${conversationId}`).emit('message_delivered', {
           messageId: message._id.toString()
         });
       } else {
@@ -746,10 +745,22 @@ io.on('connection', (socket) => {
           conversationId: conversationId,
           content: content
         });
-        console.log(📧 Stored pending notification for OFFLINE user ${receiverId} );
+        console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
       }
 
-      // Remove the old code below (lines with connectedUsers.has check)
+      socket.emit('message_sent', { 
+        tempId, 
+        messageId: message._id.toString() 
+      });
+
+    } catch (error) {
+      console.error('❌ Send message error:', error);
+      socket.emit('message_error', { 
+        error: 'Failed to send message', 
+        tempId: data.tempId 
+      });
+    }
+  });
 
   socket.on('mark_read', async (data) => {
     try {
@@ -772,7 +783,7 @@ io.on('connection', (socket) => {
         });
       }
 
-      io.to(conversation_${conversationId} ).emit('message_read', { 
+      io.to(`conversation_${conversationId}`).emit('message_read', { 
         messageId,
         readBy: socket.userId 
       });
@@ -927,33 +938,33 @@ io.on('connection', (socket) => {
   });
 
   // ========= ADD CALL NOTIFICATION HANDLER RIGHT HERE =========
-socket.on('call-not-answered', async (data) => {
-  try {
-    const { callerId, receiverId, isVideo, conversationId } = data;
-    const receiverSocketId = onlineUsers.get(receiverId);
-    
-    if (!receiverSocketId) {
-      // Receiver was OFFLINE - store missed call
-      const caller = await User.findById(callerId);
-      await PendingNotification.create({
-        userId: receiverId,
-        type: 'missed_call',
-        senderName: caller.name,
-        senderId: callerId,
-        senderAvatar: caller.avatar,
-        conversationId: conversationId,
-        callType: isVideo ? 'video call' : 'voice call',
-        content: `Missed ${isVideo ? 'video' : 'voice'} call`
-      });
-      console.log(`📞 Stored missed call notification for OFFLINE user ${receiverId}`);
+  socket.on('call-not-answered', async (data) => {
+    try {
+      const { callerId, receiverId, isVideo, conversationId } = data;
+      const receiverSocketId = onlineUsers.get(receiverId);
+      
+      if (!receiverSocketId) {
+        // Receiver was OFFLINE - store missed call
+        const caller = await User.findById(callerId);
+        await PendingNotification.create({
+          userId: receiverId,
+          type: 'missed_call',
+          senderName: caller.name,
+          senderId: callerId,
+          senderAvatar: caller.avatar,
+          conversationId: conversationId,
+          callType: isVideo ? 'video call' : 'voice call',
+          content: `Missed ${isVideo ? 'video' : 'voice'} call`
+        });
+        console.log(`📞 Stored missed call notification for OFFLINE user ${receiverId}`);
+      }
+    } catch (error) {
+      console.error('❌ Error storing missed call:', error);
     }
-  } catch (error) {
-    console.error('❌ Error storing missed call:', error);
-  }
-});
+  });
 
   socket.on('disconnect', async (reason) => {
-    console.log(🔌 User disconnected: ${socket.id}, Reason: ${reason} );
+    console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
     // Handle active calls on disconnect
     if (socket.userId && activeCalls.has(socket.userId)) {
@@ -1066,7 +1077,7 @@ app.post('/api/auth/register', async (req, res) => {
       user._id,
       'SYSTEM',
       'Welcome to Tuition Manager!',
-      You have successfully registered as a ${role.toLowerCase()}. ,
+      `You have successfully registered as a ${role.toLowerCase()}.`,
       { userId: user._id }
     );
 
@@ -1209,7 +1220,7 @@ app.delete('/api/auth/account', authRequired, async (req, res) => {
     await Notification.deleteMany({ userId });
     await User.findByIdAndDelete(userId);
 
-    console.log(✅ Account deleted: ${user.email} (${role}) );
+    console.log(`✅ Account deleted: ${user.email} (${role})`);
     res.status(204).send();
   } catch (error) {
     console.error('Account deletion error:', error);
@@ -1273,7 +1284,7 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       student._id,
       'SYSTEM',
       'New Teacher Connection',
-      ${teacher.name} has linked you as their student ,
+      `${teacher.name} has linked you as their student`,
       { teacherId: req.userId }
     );
 
@@ -1282,11 +1293,11 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       isActive: true
     });
 
-    console.log(✅ Teacher ${teacher.email} linked student ${student.email} (Student now has ${linkCount} teachers) );
+    console.log(`✅ Teacher ${teacher.email} linked student ${student.email} (Student now has ${linkCount} teachers)`);
 
     res.status(200).json({ 
       success: true, 
-      message: Successfully linked ${student.name}  
+      message: `Successfully linked ${student.name}`  
     });
   } catch (error) {
     console.error('Link student error:', error);
@@ -1340,11 +1351,11 @@ app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), as
       studentId,
       'SYSTEM',
       'Teacher Disconnected',
-      ${teacher.name} has removed you from their student list ,
+      `${teacher.name} has removed you from their student list`,
       { teacherId }
     );
 
-    console.log(✅ Teacher ${teacher.email} unlinked student ${studentId} );
+    console.log(`✅ Teacher ${teacher.email} unlinked student ${studentId}`);
     res.status(204).send();
   } catch (error) {
     console.error('Unlink student error:', error);
@@ -1790,7 +1801,7 @@ app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (re
           link.studentId,
           'CLASS',
           'New Class Added',
-          Your teacher added a new class: ${subject} ,
+          `Your teacher added a new class: ${subject}`,
           { classId: newClass._id }
         );
       }
@@ -1799,7 +1810,7 @@ app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (re
         studentId,
         'CLASS',
         'New Class Added',
-        Your teacher added a new class: ${subject} ,
+        `Your teacher added a new class: ${subject}`,
         { classId: newClass._id }
       );
     }
@@ -1951,7 +1962,7 @@ app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async
           link.studentId,
           'ASSIGNMENT',
           'New Assignment',
-          New assignment: ${title} ,
+          `New assignment: ${title}`,
           { assignmentId: assignment._id }
         );
       }
@@ -1960,7 +1971,7 @@ app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async
         studentId,
         'ASSIGNMENT',
         'New Individual Assignment',
-        New individual assignment: ${title} ,
+        `New individual assignment: ${title}`,
         { assignmentId: assignment._id }
       );
     }
@@ -2086,7 +2097,7 @@ app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER
       submission.studentId,
       'ASSIGNMENT',
       'Assignment Graded',
-      Your assignment "${submission.assignmentId.title}" has been graded. ,
+      `Your assignment "${submission.assignmentId.title}" has been graded.`,
       { assignmentId: submission.assignmentId._id, submissionId: submission._id }
     );
 
@@ -2148,7 +2159,7 @@ app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req,
           link.studentId,
           'CLASS',
           'New Note Added',
-          New note: ${title} ,
+          `New note: ${title}`,
           { noteId: note._id }
         );
       }
@@ -2157,7 +2168,7 @@ app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req,
         studentId,
         'CLASS',
         'New Note Added',
-        New note: ${title} ,
+        `New note: ${title}`,
         { noteId: note._id }
       );
     }
@@ -2271,7 +2282,7 @@ app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req,
           link.studentId,
           'EXAM',
           'New Exam Scheduled',
-          New exam: ${title} ,
+          `New exam: ${title}`,
           { examId: exam._id }
         );
       }
@@ -2280,7 +2291,7 @@ app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req,
         studentId,
         'EXAM',
         'New Individual Exam',
-        New individual exam: ${title} ,
+        `New individual exam: ${title}`,
         { examId: exam._id }
       );
     }
@@ -2402,7 +2413,7 @@ app.post('/api/teacher/results', authRequired, requireRole('TEACHER'), async (re
       studentId,
       'RESULT',
       'New Result Published',
-      Result published for: ${examTitle} ,
+      `Result published for: ${examTitle}`,
       { resultId: result._id, examTitle }
     );
 
@@ -2476,7 +2487,7 @@ app.post('/api/teacher/attendance', authRequired, requireRole('TEACHER'), async 
       if (!mark || !mark.studentId) continue;
       const isLinked = await ensureTeacherOwnsStudent(req.userId, mark.studentId);
       if (!isLinked) {
-        return res.status(403).json({ error: Not linked to student ${mark.studentId}  });
+        return res.status(403).json({ error: `Not linked to student ${mark.studentId}` });
       }
     }
 
@@ -2909,7 +2920,7 @@ app.post('/api/chat/upload-file', authRequired, upload.single('file'), async (re
       return res.status(400).json({ error: 'No file uploaded' });
     }
     
-    const fileUrl = ${req.protocol}://${req.get('host')}/uploads/${req.file.filename} ;
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     
     res.json({
       success: true,
@@ -2945,7 +2956,7 @@ app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
       message.deletedBy = userId;
       await message.save();
       
-      io.to(conversation_${message.conversationId} ).emit('message_deleted', {
+      io.to(`conversation_${message.conversationId}`).emit('message_deleted', {
         messageId: messageId,
         deletedForEveryone: true
       });
@@ -3157,7 +3168,7 @@ app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req,
       return res.status(400).json({ error: 'Only image files are allowed' });
     }
     
-    const avatarUrl = ${req.protocol}://${req.get('host')}/uploads/${req.file.filename} ;
+    const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     
     await User.findByIdAndUpdate(req.userId, { avatar: avatarUrl });
     
@@ -3209,7 +3220,7 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
         createdAt: new Date()
       });
       await conversation.save();
-      console.log(Created new conversation: ${conversation._id} );
+      console.log(`Created new conversation: ${conversation._id}`);
     }
     
     // Build message data
@@ -3255,7 +3266,7 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
     await conversation.save();
     
     // Emit via Socket.IO to receiver (if connected)
-    io.to(conversation_${conversation._id} ).emit('new_message', {
+    io.to(`conversation_${conversation._id}`).emit('new_message', {
       id: message._id.toString(),
       conversationId: conversation._id.toString(),
       content: message.content,
@@ -3307,10 +3318,10 @@ app.use((error, req, res, next) => {
 
 // ========= START SERVER =========
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(🚀 Server running on port ${PORT} );
-  console.log(📱 Environment: ${process.env.NODE_ENV || 'development'} );
-  console.log(🌐 Health check: http://localhost:${PORT}/health );
-  console.log(📊 API Base: http://localhost:${PORT}/api );
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📱 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 API Base: http://localhost:${PORT}/api`);
 });
 
 // Graceful shutdown
