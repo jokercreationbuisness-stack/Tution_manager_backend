@@ -348,6 +348,21 @@ const UserBlockSchema = new Schema({
 });
 UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
 
+// ========= ADD THIS AFTER UserBlockSchema =========
+// Pending Notification Schema
+const PendingNotificationSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  type: { type: String, enum: ['message', 'missed_call'], required: true },
+  senderName: String,
+  senderId: Types.ObjectId,
+  senderAvatar: String,
+  conversationId: String,
+  content: String,
+  callType: String,
+  read: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now, expires: 604800 } // Auto-delete after 7 days
+});
+
 // ========= MODELS =========
 const User = mongoose.model('User', UserSchema);
 const TeacherStudentLink = mongoose.model('TeacherStudentLink', TeacherStudentLinkSchema);
@@ -363,6 +378,8 @@ const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 const Message = mongoose.model('Message', MessageSchema);
 const UserBlock = mongoose.model('UserBlock', UserBlockSchema);
+
+const PendingNotification = mongoose.model('PendingNotification', PendingNotificationSchema);
 
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
@@ -488,10 +505,53 @@ const requireRole = (role) => (req, res, next) => {
   next();
 };
 
+  // ========= ADD THIS AFTER authenticate HANDLER =========
+  socket.on('request_pending_notifications', async () => {
+    try {
+      const userId = socket.userId;
+      if (!userId) {
+        console.log('❌ No userId - cannot fetch pending notifications');
+        return;
+      }
+      
+      const notifications = await PendingNotification.find({
+        userId: userId,
+        read: false
+      }).sort({ createdAt: -1 }).limit(50);
+      
+      console.log(`📬 Found ${notifications.length} pending notifications for user ${userId}`);
+      
+      const formattedNotifications = notifications.map(notif => ({
+        type: notif.type,
+        senderName: notif.senderName,
+        senderId: notif.senderId,
+        senderAvatar: notif.senderAvatar,
+        conversationId: notif.conversationId,
+        content: notif.content,
+        callType: notif.callType,
+        createdAt: notif.createdAt
+      }));
+      
+      socket.emit('pending_notifications', {
+        notifications: formattedNotifications
+      });
+      
+      await PendingNotification.updateMany(
+        { userId: userId, read: false },
+        { $set: { read: true } }
+      );
+      
+      console.log(`✅ Sent ${notifications.length} pending notifications`);
+    } catch (error) {
+      console.error('❌ Error fetching pending notifications:', error);
+    }
+  });
+
+// ========= SOCKET.IO FOR REAL-TIME =========
 // ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
-const activeCalls = new Map(); // Track active calls
-const onlineUsers = new Map(); // For WebRTC calls
+const activeCalls = new Map();
+const onlineUsers = new Map();
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
@@ -531,7 +591,7 @@ io.on('connection', (socket) => {
       }
       
       connectedUsers.set(socket.userId, socket.id);
-      onlineUsers.set(socket.userId, socket.id); // For WebRTC
+      onlineUsers.set(socket.userId, socket.id);
       socket.join(socket.userId);
       
       await User.findByIdAndUpdate(socket.userId, {
@@ -560,17 +620,51 @@ io.on('connection', (socket) => {
       
     } catch (error) {
       console.error('❌ Authentication error:', error.message);
-      let errorMessage = 'Authentication failed';
-      if (error.name === 'JsonWebTokenError') {
-        errorMessage = 'Invalid token';
-      } else if (error.name === 'TokenExpiredError') {
-        errorMessage = 'Token expired';
+      socket.emit('auth_error', { 
+        error: 'Authentication failed'
+      });
+    }
+  });
+
+  // ========= PENDING NOTIFICATIONS HANDLER =========
+  socket.on('request_pending_notifications', async () => {
+    try {
+      const userId = socket.userId;
+      if (!userId) {
+        console.log('❌ No userId - cannot fetch pending notifications');
+        return;
       }
       
-      socket.emit('auth_error', { 
-        error: errorMessage,
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
+      const notifications = await PendingNotification.find({
+        userId: userId,
+        read: false
+      }).sort({ createdAt: -1 }).limit(50);
+      
+      console.log(`📬 Found ${notifications.length} pending notifications for user ${userId}`);
+      
+      const formattedNotifications = notifications.map(notif => ({
+        type: notif.type,
+        senderName: notif.senderName,
+        senderId: notif.senderId,
+        senderAvatar: notif.senderAvatar,
+        conversationId: notif.conversationId,
+        content: notif.content,
+        callType: notif.callType,
+        createdAt: notif.createdAt
+      }));
+      
+      socket.emit('pending_notifications', {
+        notifications: formattedNotifications
       });
+      
+      await PendingNotification.updateMany(
+        { userId: userId, read: false },
+        { $set: { read: true } }
+      );
+      
+      console.log(`✅ Sent ${notifications.length} pending notifications`);
+    } catch (error) {
+      console.error('❌ Error fetching pending notifications:', error);
     }
   });
 
@@ -586,7 +680,7 @@ io.on('connection', (socket) => {
     socket.leave(`conversation_${conversationId}`);
   });
 
-    socket.on('send_message', async (data) => {
+  socket.on('send_message', async (data) => {
     try {
       const { conversationId, receiverId, content, type, iv, tempId, replyTo } = data;
       
@@ -596,10 +690,7 @@ io.on('connection', (socket) => {
       }
 
       if (!conversationId || !receiverId || !content) {
-        socket.emit('message_error', { 
-          error: 'Missing required fields',
-          tempId 
-        });
+        socket.emit('message_error', { error: 'Missing required fields', tempId });
         return;
       }
 
@@ -615,7 +706,6 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Build message data
       const messageData = {
         conversationId,
         senderId: socket.userId,
@@ -627,7 +717,6 @@ io.on('connection', (socket) => {
         read: false
       };
       
-      // Add replyTo if provided
       if (replyTo && replyTo.messageId) {
         messageData.replyTo = {
           messageId: replyTo.messageId,
@@ -660,9 +749,13 @@ io.on('connection', (socket) => {
       };
 
       io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-      io.to(receiverId.toString()).emit('new_message', messagePayload);
-
-      if (connectedUsers.has(receiverId.toString())) {
+      
+      // ========= OFFLINE CHECK =========
+      const receiverSocketId = connectedUsers.get(receiverId.toString());
+      if (receiverSocketId) {
+        // User is ONLINE
+        io.to(receiverId.toString()).emit('new_message', messagePayload);
+        
         await Message.findByIdAndUpdate(message._id, {
           delivered: true,
           deliveredAt: new Date()
@@ -671,6 +764,19 @@ io.on('connection', (socket) => {
         io.to(`conversation_${conversationId}`).emit('message_delivered', {
           messageId: message._id.toString()
         });
+      } else {
+        // User is OFFLINE - store notification
+        const sender = await User.findById(socket.userId);
+        await PendingNotification.create({
+          userId: receiverId,
+          type: 'message',
+          senderName: sender.name,
+          senderId: socket.userId,
+          senderAvatar: sender.avatar,
+          conversationId: conversationId,
+          content: content
+        });
+        console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
       }
 
       await createNotification(
@@ -688,17 +794,13 @@ io.on('connection', (socket) => {
 
     } catch (error) {
       console.error('❌ Send message error:', error);
-      socket.emit('message_error', { 
-        error: 'Failed to send message',
-        tempId: data.tempId 
-      });
+      socket.emit('message_error', { error: 'Failed to send message', tempId: data.tempId });
     }
   });
 
   socket.on('mark_read', async (data) => {
     try {
       const { messageId, conversationId } = data;
-      
       if (!socket.userId) return;
 
       await Message.findByIdAndUpdate(messageId, {
@@ -707,68 +809,33 @@ io.on('connection', (socket) => {
       });
 
       if (socket.role === 'TEACHER') {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          unreadCountTeacher: 0
-        });
+        await Conversation.findByIdAndUpdate(conversationId, { unreadCountTeacher: 0 });
       } else {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          unreadCountStudent: 0
-        });
+        await Conversation.findByIdAndUpdate(conversationId, { unreadCountStudent: 0 });
       }
 
       io.to(`conversation_${conversationId}`).emit('message_read', { 
         messageId,
         readBy: socket.userId 
       });
-
     } catch (error) {
       console.error('❌ Mark read error:', error);
-    }
-  });
-
-  socket.on('user_online', async () => {
-    if (socket.userId) {
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: true,
-        lastSeen: new Date()
-      });
-      io.emit('user_online', { userId: socket.userId });
-    }
-  });
-
-  socket.on('user_offline', async () => {
-    if (socket.userId) {
-      const lastSeen = new Date();
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: false,
-        lastSeen: lastSeen
-      });
-      io.emit('user_offline', { 
-        userId: socket.userId,
-        lastSeen: lastSeen.toISOString()
-      });
     }
   });
 
   socket.on('typing', (data) => {
     const { conversationId, receiverId } = data;
     if (!socket.userId) return;
-    io.to(receiverId.toString()).emit('user_typing', { 
-      conversationId, 
-      userId: socket.userId 
-    });
+    io.to(receiverId.toString()).emit('user_typing', { conversationId, userId: socket.userId });
   });
 
   socket.on('stop_typing', (data) => {
     const { conversationId, receiverId } = data;
     if (!socket.userId) return;
-    io.to(receiverId.toString()).emit('user_stop_typing', { 
-      conversationId, 
-      userId: socket.userId 
-    });
+    io.to(receiverId.toString()).emit('user_stop_typing', { conversationId, userId: socket.userId });
   });
 
-  // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
+  // ========= WEBRTC CALL HANDLERS =========
   socket.on('call-user', async (data) => {
     try {
       const { receiverId, callType, offer } = data;
@@ -779,24 +846,20 @@ io.on('connection', (socket) => {
         return;
       }
       
-      // Check authorization (teacher-student link)
       const isAuthorized = await checkCallAuthorization(callerId, receiverId);
       if (!isAuthorized) {
         socket.emit('call-error', { error: 'Not authorized' });
         return;
       }
       
-      // Get caller info
       const caller = await User.findById(callerId).select('name avatar');
-      
-      // Find receiver's socket
       const receiverSocketId = onlineUsers.get(receiverId);
+      
       if (!receiverSocketId) {
         socket.emit('call-error', { error: 'User offline' });
         return;
       }
       
-      // Send call notification to receiver
       io.to(receiverSocketId).emit('call-made', {
         callerId: callerId,
         callerName: caller.name,
@@ -805,21 +868,17 @@ io.on('connection', (socket) => {
         offer: offer
       });
       
-      // Notify caller that call is ringing
       socket.emit('call-ringing');
-      
     } catch (error) {
       console.error('Call user error:', error);
       socket.emit('call-error', { error: 'Failed to initiate call' });
     }
   });
   
-  // Answer call
   socket.on('answer-call', async (data) => {
     try {
       const { callerId, answer } = data;
       const callerSocketId = onlineUsers.get(callerId);
-      
       if (callerSocketId) {
         io.to(callerSocketId).emit('call-answered', { answer });
       }
@@ -828,12 +887,10 @@ io.on('connection', (socket) => {
     }
   });
   
-  // Reject call
   socket.on('reject-call', async (data) => {
     try {
       const { callerId } = data;
       const callerSocketId = onlineUsers.get(callerId);
-      
       if (callerSocketId) {
         io.to(callerSocketId).emit('call-rejected');
       }
@@ -842,12 +899,10 @@ io.on('connection', (socket) => {
     }
   });
   
-  // End call
   socket.on('end-call', async (data) => {
     try {
       const { targetUserId } = data;
       const targetSocketId = onlineUsers.get(targetUserId);
-      
       if (targetSocketId) {
         io.to(targetSocketId).emit('call-ended');
       }
@@ -856,12 +911,10 @@ io.on('connection', (socket) => {
     }
   });
   
-  // ICE candidate exchange
   socket.on('ice-candidate', async (data) => {
     try {
       const { targetUserId, candidate } = data;
       const targetSocketId = onlineUsers.get(targetUserId);
-      
       if (targetSocketId) {
         io.to(targetSocketId).emit('ice-candidate', { candidate });
       }
@@ -870,10 +923,34 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========= MISSED CALL HANDLER =========
+  socket.on('call-not-answered', async (data) => {
+    try {
+      const { callerId, receiverId, isVideo, conversationId } = data;
+      const receiverSocketId = onlineUsers.get(receiverId);
+      
+      if (!receiverSocketId) {
+        const caller = await User.findById(callerId);
+        await PendingNotification.create({
+          userId: receiverId,
+          type: 'missed_call',
+          senderName: caller.name,
+          senderId: callerId,
+          senderAvatar: caller.avatar,
+          conversationId: conversationId,
+          callType: isVideo ? 'video call' : 'voice call',
+          content: `Missed ${isVideo ? 'video' : 'voice'} call`
+        });
+        console.log(`📞 Stored missed call notification for OFFLINE user ${receiverId}`);
+      }
+    } catch (error) {
+      console.error('❌ Error storing missed call:', error);
+    }
+  });
+
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
-    // Handle active calls on disconnect
     if (socket.userId && activeCalls.has(socket.userId)) {
       const otherUserId = activeCalls.get(socket.userId);
       activeCalls.delete(socket.userId);
