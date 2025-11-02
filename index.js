@@ -926,6 +926,32 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========= ADD CALL NOTIFICATION HANDLER RIGHT HERE =========
+socket.on('call-not-answered', async (data) => {
+  try {
+    const { callerId, receiverId, isVideo, conversationId } = data;
+    const receiverSocketId = onlineUsers.get(receiverId);
+    
+    if (!receiverSocketId) {
+      // Receiver was OFFLINE - store missed call
+      const caller = await User.findById(callerId);
+      await PendingNotification.create({
+        userId: receiverId,
+        type: 'missed_call',
+        senderName: caller.name,
+        senderId: callerId,
+        senderAvatar: caller.avatar,
+        conversationId: conversationId,
+        callType: isVideo ? 'video call' : 'voice call',
+        content: `Missed ${isVideo ? 'video' : 'voice'} call`
+      });
+      console.log(`📞 Stored missed call notification for OFFLINE user ${receiverId}`);
+    }
+  } catch (error) {
+    console.error('❌ Error storing missed call:', error);
+  }
+});
+
   socket.on('disconnect', async (reason) => {
     console.log(🔌 User disconnected: ${socket.id}, Reason: ${reason} );
     
