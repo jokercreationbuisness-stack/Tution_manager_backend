@@ -2937,13 +2937,13 @@ app.post('/api/chat/upload-file', authRequired, upload.single('file'), async (re
 });
 
 // ========= VOICE MESSAGE UPLOAD =========
+// Make sure multer is configured for 'voice' field
 app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No voice file uploaded' });
     }
     
-    // Validate it's an audio file
     const allowedAudioTypes = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/3gpp', 'audio/aac', 'audio/wav', 'audio/ogg'];
     if (!allowedAudioTypes.includes(req.file.mimetype)) {
       return res.status(400).json({ error: 'Only audio files are allowed' });
@@ -2951,8 +2951,6 @@ app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (
     
     const duration = parseInt(req.body.duration) || 0;
     const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    
-    console.log(`🎤 Voice message uploaded: ${req.file.originalname}, Duration: ${duration}s`);
     
     res.json({
       success: true,
