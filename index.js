@@ -433,6 +433,32 @@ const createNotification = async (userId, type, title, message, data = {}) => {
   }
 };
 
+// ========= BLOCKING HELPER FUNCTIONS =========
+async function isBlocked(blockerId, blockedId) {
+  try {
+    const block = await UserBlock.exists({ 
+      blockerId, 
+      blockedId 
+    });
+    return !!block;
+  } catch (error) {
+    console.error('isBlocked check error:', error);
+    return false;
+  }
+}
+
+async function getBlockedUserIds(userId) {
+  try {
+    const blocks = await UserBlock.find({ blockerId: userId })
+      .select('blockedId')
+      .lean();
+    return blocks.map(b => b.blockedId.toString());
+  } catch (error) {
+    console.error('getBlockedUserIds error:', error);
+    return [];
+  }
+}
+
 // ========= WEBRTC HELPER FUNCTION =========
 async function checkCallAuthorization(callerId, receiverId) {
   try {
@@ -648,7 +674,6 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async (data) => {
   try {
-    // ✅ Extract ALL fields from data object
     const { 
       conversationId, 
       receiverId, 
@@ -669,6 +694,18 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // ========= ADD THIS BLOCKING CHECK HERE =========
+    const blocked = await isBlocked(receiverId, socket.userId);
+    if (blocked) {
+      console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
+      socket.emit('message_sent', { 
+        tempId, 
+        messageId: Date.now().toString()
+      });
+      return; // Don't deliver message
+    }
+    // ========= END OF BLOCKING CHECK =========
+
     if (!conversationId || !receiverId || !content) {
       socket.emit('message_error', { 
         error: 'Missing required fields',
@@ -676,6 +713,8 @@ io.on('connection', (socket) => {
       });
       return;
     }
+
+    // ... rest of your existing code
 
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
@@ -866,6 +905,14 @@ io.on('connection', (socket) => {
         socket.emit('call-error', { error: 'Invalid call data' });
         return;
       }
+
+      // ========= ADD THIS BLOCKING CHECK HERE =========
+    const blocked = await isBlocked(receiverId, callerId);
+    if (blocked) {
+      console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
+      socket.emit('call-error', { error: 'User is unavailable' });
+      return;
+    }
       
       // Check authorization (teacher-student link)
       const isAuthorized = await checkCallAuthorization(callerId, receiverId);
