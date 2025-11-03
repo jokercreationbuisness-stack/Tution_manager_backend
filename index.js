@@ -1352,6 +1352,113 @@ app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (re
   }
 });
 
+// ========= TEACHER RANKINGS ENDPOINT =========
+
+// GET /api/teacher/rankings
+app.get('/api/teacher/rankings', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+
+    // Get all results for this teacher
+    const results = await Result.find({
+      teacherId: teacherId,
+      published: true
+    })
+    .populate('studentId', 'name studentCode')
+    .populate('examId')
+    .sort({ publishedAt: -1 })
+    .lean();
+
+    if (!results || results.length === 0) {
+      return res.json({
+        success: true,
+        rankings: []
+      });
+    }
+
+    // Group results by exam
+    const examGroups = {};
+    results.forEach(result => {
+      const examKey = result.examId?._id?.toString() || result.examTitle;
+      
+      if (!examGroups[examKey]) {
+        examGroups[examKey] = {
+          examTitle: result.examTitle,
+          subject: result.subject || 'General',
+          date: result.publishedAt || result.createdAt,
+          results: []
+        };
+      }
+      
+      examGroups[examKey].results.push({
+        studentId: result.studentId?._id?.toString() || '',
+        studentName: result.studentId?.name || 'Unknown Student',
+        studentCode: result.studentId?.studentCode || null,
+        obtainedMarks: result.obtainedMarks,
+        totalMarks: result.totalMarks,
+        percentage: result.percentage || ((result.obtainedMarks / result.totalMarks) * 100),
+        grade: result.grade || calculateGrade((result.obtainedMarks / result.totalMarks) * 100)
+      });
+    });
+
+    // Process each exam group into ranking format
+    const rankings = Object.values(examGroups).map(examGroup => {
+      // Sort students by percentage (descending)
+      const sortedResults = examGroup.results.sort((a, b) => b.percentage - a.percentage);
+      
+      // Assign ranks
+      let currentRank = 1;
+      const rankedStudents = sortedResults.map((student, index) => {
+        // Handle ties - same percentage gets same rank
+        if (index > 0 && student.percentage < sortedResults[index - 1].percentage) {
+          currentRank = index + 1;
+        }
+        
+        return {
+          rank: currentRank,
+          studentId: student.studentId,
+          studentName: student.studentName,
+          studentCode: student.studentCode,
+          obtainedMarks: parseFloat(student.obtainedMarks),
+          totalMarks: parseFloat(student.totalMarks),
+          percentage: parseFloat(student.percentage.toFixed(2)),
+          grade: student.grade
+        };
+      });
+
+      // Calculate statistics
+      const totalStudents = rankedStudents.length;
+      const topPerformer = rankedStudents.length > 0 ? rankedStudents[0].studentName : null;
+      const averagePercentage = totalStudents > 0
+        ? parseFloat((rankedStudents.reduce((sum, s) => sum + s.percentage, 0) / totalStudents).toFixed(2))
+        : 0;
+
+      return {
+        examTitle: examGroup.examTitle,
+        subject: examGroup.subject,
+        date: examGroup.date.toISOString(),
+        totalStudents: totalStudents,
+        topPerformer: topPerformer,
+        averagePercentage: averagePercentage,
+        rankings: rankedStudents
+      };
+    });
+
+    res.json({
+      success: true,
+      rankings: rankings
+    });
+
+  } catch (error) {
+    console.error('Teacher rankings error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch rankings',
+      rankings: []
+    });
+  }
+});
+
 app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const studentId = req.params.id;
