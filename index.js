@@ -1778,6 +1778,112 @@ app.get('/api/teacher/dashboard', authRequired, requireRole('TEACHER'), async (r
   }
 });
 
+// ========= TEACHER ANALYTICS ENDPOINTS =========
+
+// Analytics Overview - GET /api/teacher/analytics/overview
+app.get('/api/teacher/analytics/overview', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+
+    // Get student count
+    const studentCount = await TeacherStudentLink.countDocuments({ 
+      teacherId, 
+      isActive: true 
+    });
+
+    // Get active class count
+    const classCount = await ClassModel.countDocuments({ 
+      teacherId, 
+      isActive: true 
+    });
+
+    // Get pending assignment submissions count
+    const assignments = await Assignment.find({ teacherId }).select('_id');
+    const assignmentIds = assignments.map(a => a._id);
+    const pendingAssignments = await AssignmentSubmission.countDocuments({
+      assignmentId: { $in: assignmentIds },
+      status: { $in: ['SUBMITTED', 'LATE'] }
+    });
+
+    // Get upcoming exams (next 7 days)
+    const today = new Date();
+    const nextWeek = new Date();
+    nextWeek.setDate(today.getDate() + 7);
+    
+    const upcomingExams = await Exam.countDocuments({
+      teacherId,
+      isActive: true,
+      whenAt: { $gte: today, $lte: nextWeek }
+    });
+
+    res.json({
+      success: true,
+      studentCount,
+      classCount,
+      pendingAssignments,
+      upcomingExams
+    });
+
+  } catch (error) {
+    console.error('Analytics overview error:', error);
+    res.status(500).json({ error: 'Failed to fetch analytics overview' });
+  }
+});
+
+// Student Analytics - GET /api/teacher/analytics/:studentId
+app.get('/api/teacher/analytics/:studentId', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const teacherId = req.userId;
+    const studentId = req.params.studentId;
+
+    // Verify teacher owns this student
+    const isLinked = await ensureTeacherOwnsStudent(teacherId, studentId);
+    if (!isLinked) {
+      return res.status(403).json({ error: 'Not authorized to view this student\'s analytics' });
+    }
+
+    // Get all attendance records for this student
+    const attendanceRecords = await Attendance.find({
+      teacherId: teacherId,
+      'marks.studentId': studentId
+    }).lean();
+
+    let attended = 0;
+    let missed = 0;
+    let cancelled = 0;
+
+    // Count attendance stats
+    attendanceRecords.forEach(record => {
+      const studentMark = record.marks.find(m => m.studentId.toString() === studentId);
+      if (studentMark) {
+        if (studentMark.present) {
+          attended++;
+        } else {
+          missed++;
+        }
+      }
+    });
+
+    // Calculate attendance rate
+    const totalClasses = attended + missed;
+    const attendanceRate = totalClasses > 0 
+      ? (attended / totalClasses) * 100 
+      : 0;
+
+    res.json({
+      success: true,
+      attended,
+      missed,
+      cancelled, // Currently 0, can be enhanced later
+      attendanceRate: Math.round(attendanceRate * 100) / 100
+    });
+
+  } catch (error) {
+    console.error('Student analytics error:', error);
+    res.status(500).json({ error: 'Failed to fetch student analytics' });
+  }
+});
+
 // ========= CLASS MANAGEMENT =========
 app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
