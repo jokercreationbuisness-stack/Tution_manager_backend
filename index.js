@@ -647,46 +647,60 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    try {
-      const { conversationId, receiverId, content, type, iv, tempId, replyTo } = data;
-      
-      if (!socket.userId) {
-        socket.emit('message_error', { error: 'Not authenticated', tempId });
-        return;
-      }
+  try {
+    // ✅ Extract ALL fields from data object
+    const { 
+      conversationId, 
+      receiverId, 
+      content, 
+      type, 
+      iv, 
+      tempId, 
+      replyTo,
+      fileUrl,
+      fileName,
+      fileSize,
+      mimeType,
+      duration
+    } = data;
+    
+    if (!socket.userId) {
+      socket.emit('message_error', { error: 'Not authenticated', tempId });
+      return;
+    }
 
-      if (!conversationId || !receiverId || !content) {
-        socket.emit('message_error', { 
-          error: 'Missing required fields',
-          tempId 
-        });
-        return;
-      }
+    if (!conversationId || !receiverId || !content) {
+      socket.emit('message_error', { 
+        error: 'Missing required fields',
+        tempId 
+      });
+      return;
+    }
 
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        socket.emit('message_error', { error: 'Conversation not found', tempId });
-        return;
-      }
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      socket.emit('message_error', { error: 'Conversation not found', tempId });
+      return;
+    }
 
-      if (conversation.teacherId.toString() !== socket.userId && 
-          conversation.studentId.toString() !== socket.userId) {
-        socket.emit('message_error', { error: 'Not authorized', tempId });
-        return;
-      }
+    if (conversation.teacherId.toString() !== socket.userId && 
+        conversation.studentId.toString() !== socket.userId) {
+      socket.emit('message_error', { error: 'Not authorized', tempId });
+      return;
+    }
 
-      // Build message data
-      const messageData = {
+    // ✅ Build message data with ALL fields
+    const messageData = {
       conversationId,
       senderId: socket.userId,
       receiverId,
       content,
       type: type || 'TEXT',
-      fileUrl: fileUrl || null,      // ✅ ADD
-      fileName: fileName || null,    // ✅ ADD
-      fileSize: fileSize || null,    // ✅ ADD
-      mimeType: mimeType || null,    // ✅ ADD
-      duration: duration || null,    // ✅ ADD
+      fileUrl: fileUrl || null,
+      fileName: fileName || null,
+      fileSize: fileSize || null,
+      mimeType: mimeType || null,
+      duration: duration || null,
       iv,
       delivered: false,
       read: false
