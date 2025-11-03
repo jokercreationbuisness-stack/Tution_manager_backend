@@ -3202,7 +3202,7 @@ app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (
 app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
   try {
     const messageId = req.params.id;
-    const { deleteForEveryone } = req.body;
+    const deleteForEveryone = req.query.deleteForEveryone === 'true';  // ✅ NEW - reading from query
     const userId = req.userId;
     
     const message = await Message.findById(messageId);
