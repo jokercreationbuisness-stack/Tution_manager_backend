@@ -677,15 +677,20 @@ io.on('connection', (socket) => {
 
       // Build message data
       const messageData = {
-        conversationId,
-        senderId: socket.userId,
-        receiverId,
-        content,
-        type: type || 'TEXT',
-        iv,
-        delivered: false,
-        read: false
-      };
+      conversationId,
+      senderId: socket.userId,
+      receiverId,
+      content,
+      type: type || 'TEXT',
+      fileUrl: fileUrl || null,      // ✅ ADD
+      fileName: fileName || null,    // ✅ ADD
+      fileSize: fileSize || null,    // ✅ ADD
+      mimeType: mimeType || null,    // ✅ ADD
+      duration: duration || null,    // ✅ ADD
+      iv,
+      delivered: false,
+      read: false
+    };
       
       // Add replyTo if provided
       if (replyTo && replyTo.messageId) {
