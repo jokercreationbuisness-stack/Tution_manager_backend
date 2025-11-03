@@ -315,11 +315,12 @@ const MessageSchema = new Schema({
   senderId: { type: Types.ObjectId, ref: 'User', required: true },
   receiverId: { type: Types.ObjectId, ref: 'User', required: true },
   content: { type: String },
-  type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF'], default: 'TEXT' },
+  type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF', 'VOICE'], default: 'TEXT' },  // ← ADD 'VOICE' here
   fileUrl: { type: String },
   fileName: { type: String },
   fileSize: { type: Number },
   mimeType: { type: String },
+  duration: { type: Number },  // ← ADD THIS LINE (voice duration in seconds)
   iv: { type: String },
   delivered: { type: Boolean, default: false },
   deliveredAt: { type: Date },
@@ -334,7 +335,7 @@ const MessageSchema = new Schema({
     content: { type: String },
     senderId: { type: Types.ObjectId, ref: 'User' },
     senderName: { type: String },
-    type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF'], default: 'TEXT' }
+    type: { type: String, enum: ['TEXT', 'IMAGE', 'FILE', 'PDF', 'VOICE'], default: 'TEXT' }  // ← ADD 'VOICE' here too
   },
   createdAt: { type: Date, default: Date.now }
 });
@@ -2932,6 +2933,38 @@ app.post('/api/chat/upload-file', authRequired, upload.single('file'), async (re
   } catch (error) {
     console.error('File upload error:', error);
     res.status(500).json({ error: 'Failed to upload file' });
+  }
+});
+
+// ========= VOICE MESSAGE UPLOAD =========
+app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No voice file uploaded' });
+    }
+    
+    // Validate it's an audio file
+    const allowedAudioTypes = ['audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/3gpp', 'audio/aac', 'audio/wav', 'audio/ogg'];
+    if (!allowedAudioTypes.includes(req.file.mimetype)) {
+      return res.status(400).json({ error: 'Only audio files are allowed' });
+    }
+    
+    const duration = parseInt(req.body.duration) || 0;
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    
+    console.log(`🎤 Voice message uploaded: ${req.file.originalname}, Duration: ${duration}s`);
+    
+    res.json({
+      success: true,
+      fileUrl,
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype,
+      duration: duration
+    });
+  } catch (error) {
+    console.error('Voice upload error:', error);
+    res.status(500).json({ error: 'Failed to upload voice message' });
   }
 });
 
