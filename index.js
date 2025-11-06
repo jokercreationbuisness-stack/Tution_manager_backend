@@ -3369,6 +3369,7 @@ app.patch('/api/chat/messages/:id/delete-for-me', authRequired, async (req, res)
   }
 });
 
+// Delete conversation - FIXED VERSION
 app.delete('/api/chat/conversations/:id', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
@@ -3380,23 +3381,27 @@ app.delete('/api/chat/conversations/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Conversation not found' });
     }
     
-    if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
+    if (conversation.teacherId.toString() !== userId && 
+        conversation.studentId.toString() !== userId) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    if (role === 'TEACHER') {
-      await TeacherStudentLink.findOneAndUpdate(
-        { teacherId: userId, studentId: conversation.studentId, isActive: true },
-        { isActive: false, unlinkedAt: new Date() }
-      );
-    }
-    
+    // Mark messages as deleted for this user
     await Message.updateMany(
       { conversationId: conversationId },
       { $addToSet: { deletedForUsers: userId } }
     );
     
+    // ✅ FIX: ACTUALLY DELETE the conversation document
+    // This removes it from the chat list
+    await Conversation.findByIdAndDelete(conversationId);
+    
+    // IMPORTANT: Teacher-student link is NOT affected
+    // User can re-add via + button because link still exists
+    
+    console.log(`✅ Conversation ${conversationId} deleted successfully`);
     res.json({ success: true, message: 'Chat deleted successfully' });
+    
   } catch (error) {
     console.error('Delete conversation error:', error);
     res.status(500).json({ error: 'Failed to delete conversation' });
