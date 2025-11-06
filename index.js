@@ -1587,22 +1587,25 @@ app.get('/api/student/profile', authRequired, requireRole('STUDENT'), async (req
 
 app.get('/api/student/teachers', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
+    // ✅ Get ALL links (active AND blocked) so student can unblock
     const links = await TeacherStudentLink.find({ 
-      studentId: req.userId, 
-      isActive: true 
+      studentId: req.userId
+      // Removed isActive filter - show blocked teachers too!
     })
     .populate('teacherId', 'name email mobile avatar')
     .lean();
 
-    const teachers = links.map(link => ({
-      id: link.teacherId._id.toString(),
-      name: link.teacherId.name,
-      email: link.teacherId.email,
-      mobile: link.teacherId.mobile,
-      avatar: link.teacherId.avatar,
-      linkedDate: link.linkedAt,           // ✅ NEW
-      isBlocked: link.isBlocked || false   // ✅ NEW
-    }));
+    const teachers = links
+      .filter(link => link.teacherId) // Only filter out null teachers
+      .map(link => ({
+        id: link.teacherId._id.toString(),
+        name: link.teacherId.name,
+        email: link.teacherId.email,
+        mobile: link.teacherId.mobile,
+        avatar: link.teacherId.avatar,
+        linkedDate: link.linkedAt,
+        isBlocked: link.isBlocked || false  // ✅ Show block status
+      }));
 
     res.json({ success: true, teachers });
   } catch (error) {
