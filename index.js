@@ -128,7 +128,11 @@ const TeacherStudentLinkSchema = new Schema({
   studentId: { type: Types.ObjectId, ref: 'User', required: true },
   isActive: { type: Boolean, default: true },
   linkedAt: { type: Date, default: Date.now },
-  unlinkedAt: { type: Date }
+  unlinkedAt: { type: Date },
+  // ✅ NEW: Blocking fields
+  isBlocked: { type: Boolean, default: false },
+  blockedAt: { type: Date },
+  blockedBy: { type: String, enum: ['student', 'teacher'] }
 });
 TeacherStudentLinkSchema.index({ teacherId: 1, studentId: 1 }, { unique: true });
 
@@ -1297,6 +1301,7 @@ app.delete('/api/auth/account', authRequired, async (req, res) => {
 });
 
 // ========= TEACHER-STUDENT LINK ENDPOINTS =========
+// POST /api/teacher/link-student - Link a student using their code
 app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { code } = req.body;
@@ -1305,6 +1310,7 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       return res.status(400).json({ error: 'Student code is required' });
     }
 
+    // Find the student by code
     const student = await User.findOne({ 
       studentCode: code, 
       role: 'STUDENT', 
@@ -1315,6 +1321,20 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       return res.status(404).json({ error: 'Student not found with this code' });
     }
 
+    // ✅ NEW: Check if student has BLOCKED this teacher
+    const blockedLink = await TeacherStudentLink.findOne({
+      teacherId: req.userId,
+      studentId: student._id,
+      isBlocked: true
+    });
+
+    if (blockedLink) {
+      return res.status(403).json({ 
+        error: 'This student has blocked you. They must unblock you first.' 
+      });
+    }
+
+    // Check if already linked and active
     const existingLink = await TeacherStudentLink.findOne({
       teacherId: req.userId,
       studentId: student._id,
@@ -1328,6 +1348,7 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       });
     }
 
+    // Check if there's a deactivated (unlinked) link
     const deactivatedLink = await TeacherStudentLink.findOne({
       teacherId: req.userId,
       studentId: student._id,
@@ -1335,10 +1356,12 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
     });
 
     if (deactivatedLink) {
+      // Re-activate the existing link
       deactivatedLink.isActive = true;
       deactivatedLink.linkedAt = new Date();
       await deactivatedLink.save();
     } else {
+      // Create new link
       await TeacherStudentLink.create({
         teacherId: req.userId,
         studentId: student._id,
@@ -1347,6 +1370,7 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
       });
     }
 
+    // Send notification to student
     const teacher = await User.findById(req.userId);
     await createNotification(
       student._id,
@@ -1365,8 +1389,9 @@ app.post('/api/teacher/link-student', authRequired, requireRole('TEACHER'), asyn
 
     res.status(200).json({ 
       success: true, 
-      message: `Successfully linked ${student.name}`  
+      message: `Successfully linked ${student.name}` 
     });
+    
   } catch (error) {
     console.error('Link student error:', error);
     res.status(500).json({ error: 'Failed to link student' });
@@ -1562,21 +1587,170 @@ app.get('/api/student/profile', authRequired, requireRole('STUDENT'), async (req
 
 app.get('/api/student/teachers', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true })
-      .populate('teacherId', 'name email mobile avatar')
-      .lean();
+    const links = await TeacherStudentLink.find({ 
+      studentId: req.userId, 
+      isActive: true 
+    })
+    .populate('teacherId', 'name email mobile avatar')
+    .lean();
 
     const teachers = links.map(link => ({
       id: link.teacherId._id.toString(),
       name: link.teacherId.name,
       email: link.teacherId.email,
       mobile: link.teacherId.mobile,
-      avatar: link.teacherId.avatar
+      avatar: link.teacherId.avatar,
+      linkedDate: link.linkedAt,           // ✅ NEW
+      isBlocked: link.isBlocked || false   // ✅ NEW
     }));
 
     res.json({ success: true, teachers });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch teachers' });
+  }
+});
+
+// ========= STUDENT TEACHER MANAGEMENT (UNLINK/BLOCK/UNBLOCK) =========
+
+// POST /api/student/teachers/:teacherId/unlink
+app.post('/api/student/teachers/:teacherId/unlink', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const teacherId = req.params.teacherId;
+    
+    // Find the link
+    const link = await TeacherStudentLink.findOne({
+      teacherId: teacherId,
+      studentId: studentId
+    });
+    
+    if (!link) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Teacher link not found' 
+      });
+    }
+    
+    // Unlink: Deactivate the link (teacher can re-add student later)
+    link.isActive = false;
+    link.unlinkedAt = new Date();
+    await link.save();
+    
+    console.log(`✅ Student ${studentId} unlinked teacher ${teacherId}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Teacher unlinked successfully. They can add you again.' 
+    });
+    
+  } catch (error) {
+    console.error('Unlink teacher error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to unlink teacher' 
+    });
+  }
+});
+
+// POST /api/student/teachers/:teacherId/block
+app.post('/api/student/teachers/:teacherId/block', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const teacherId = req.params.teacherId;
+    
+    // Find the link
+    const link = await TeacherStudentLink.findOne({
+      teacherId: teacherId,
+      studentId: studentId
+    });
+    
+    if (!link) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Teacher link not found' 
+      });
+    }
+    
+    // Block: Deactivate link + mark as blocked (teacher CANNOT re-add)
+    link.isActive = false;
+    link.isBlocked = true;
+    link.blockedAt = new Date();
+    link.blockedBy = 'student';
+    await link.save();
+    
+    // Also add to user block list (for calls/messages)
+    const existingBlock = await UserBlock.findOne({ 
+      blockerId: studentId, 
+      blockedId: teacherId 
+    });
+    
+    if (!existingBlock) {
+      await UserBlock.create({ 
+        blockerId: studentId, 
+        blockedId: teacherId 
+      });
+    }
+    
+    console.log(`🚫 Student ${studentId} blocked teacher ${teacherId}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Teacher blocked successfully. They cannot add you until you unblock them.' 
+    });
+    
+  } catch (error) {
+    console.error('Block teacher error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to block teacher' 
+    });
+  }
+});
+
+// POST /api/student/teachers/:teacherId/unblock
+app.post('/api/student/teachers/:teacherId/unblock', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const teacherId = req.params.teacherId;
+    
+    // Find the blocked link
+    const link = await TeacherStudentLink.findOne({
+      teacherId: teacherId,
+      studentId: studentId
+    });
+    
+    if (!link) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Teacher link not found' 
+      });
+    }
+    
+    // Unblock: Remove block status
+    link.isBlocked = false;
+    link.blockedAt = null;
+    link.blockedBy = null;
+    await link.save();
+    
+    // Remove from user block list
+    await UserBlock.findOneAndDelete({ 
+      blockerId: studentId, 
+      blockedId: teacherId 
+    });
+    
+    console.log(`✅ Student ${studentId} unblocked teacher ${teacherId}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Teacher unblocked successfully. They can now add you again.' 
+    });
+    
+  } catch (error) {
+    console.error('Unblock teacher error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to unblock teacher' 
+    });
   }
 });
 
