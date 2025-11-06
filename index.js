@@ -3493,6 +3493,81 @@ app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req,
   }
 });
 
+// ========= GET USER PROFILE BY ID =========
+// Add this after the /api/users/avatar endpoint
+app.get('/api/users/:userId', authRequired, async (req, res) => {
+  try {
+    const requestedUserId = req.params.userId;
+    const currentUserId = req.userId;
+    const currentUserRole = req.role;
+    
+    // Find the requested user
+    const user = await User.findById(requestedUserId)
+      .select('name email avatar role studentCode isOnline lastSeen')
+      .lean();
+    
+    if (!user) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'User not found' 
+      });
+    }
+    
+    // Authorization check: Only allow viewing profiles of linked users
+    if (currentUserRole === 'TEACHER') {
+      // Teacher can view their students
+      const link = await TeacherStudentLink.findOne({
+        teacherId: currentUserId,
+        studentId: requestedUserId,
+        isActive: true
+      });
+      
+      if (!link && requestedUserId !== currentUserId) {
+        return res.status(403).json({ 
+          success: false,
+          error: 'Not authorized to view this profile' 
+        });
+      }
+    } else if (currentUserRole === 'STUDENT') {
+      // Student can view their teachers
+      const link = await TeacherStudentLink.findOne({
+        teacherId: requestedUserId,
+        studentId: currentUserId,
+        isActive: true
+      });
+      
+      if (!link && requestedUserId !== currentUserId) {
+        return res.status(403).json({ 
+          success: false,
+          error: 'Not authorized to view this profile' 
+        });
+      }
+    }
+    
+    // Return user profile
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar,
+        role: user.role,
+        studentCode: user.studentCode,
+        isOnline: user.isOnline,
+        lastSeen: user.lastSeen
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get user profile error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch user profile' 
+    });
+  }
+});
+
 // Add this to your backend with your other chat endpoints
 app.post('/api/chat/messages/new', authRequired, async (req, res) => {
   try {
