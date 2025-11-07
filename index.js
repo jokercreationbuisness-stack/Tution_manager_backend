@@ -120,6 +120,14 @@ const UserSchema = new Schema({
   isOnline: { type: Boolean, default: false },
   lastSeen: { type: Date, default: Date.now },
   createdAt: { type: Date, default: Date.now }
+  subscriptionStatus: { 
+  type: String, 
+  enum: ['free', 'trial', 'active', 'expired'], 
+  default: 'free' 
+},
+subscriptionExpiry: { type: Date },
+totalGameXP: { type: Number, default: 0 },
+gamesPlayed: { type: Number, default: 0 }
 });
 
 // Teacher-Student Link
@@ -354,6 +362,38 @@ const UserBlockSchema = new Schema({
 });
 UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
 
+// ========= GAME SCHEMAS (ADD AFTER UserBlockSchema) =========
+
+// User XP Tracking
+const UserXPSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true, unique: true },
+  totalXP: { type: Number, default: 0 },
+  level: { type: Number, default: 1 },
+  quizXP: { type: Number, default: 0 },
+  mathXP: { type: Number, default: 0 },
+  memoryXP: { type: Number, default: 0 },
+  hangmanXP: { type: Number, default: 0 },
+  gamesPlayed: { type: Number, default: 0 },
+  lastUpdated: { type: Date, default: Date.now }
+});
+UserXPSchema.index({ userId: 1 });
+
+// Game Score
+const GameScoreSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  username: { type: String, required: true },
+  gameType: { type: String, enum: ['quiz', 'math', 'memory', 'hangman'], required: true, index: true },
+  score: { type: Number, required: true, default: 0 },
+  xpEarned: { type: Number, required: true, default: 0 },
+  difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
+  questionsAnswered: { type: Number, default: 0 },
+  correctAnswers: { type: Number, default: 0 },
+  timeTaken: { type: Number, default: 0 },
+  playedAt: { type: Date, default: Date.now, index: true }
+});
+GameScoreSchema.index({ userId: 1, gameType: 1, playedAt: -1 });
+GameScoreSchema.index({ gameType: 1, score: -1 });
+
 // ========= ADD THIS AFTER UserBlockSchema =========
 // Pending Notification Schema
 const PendingNotificationSchema = new Schema({
@@ -384,6 +424,8 @@ const PlannerTask = mongoose.model('PlannerTask', PlannerTaskSchema);
 const Conversation = mongoose.model('Conversation', ConversationSchema);
 const Message = mongoose.model('Message', MessageSchema);
 const UserBlock = mongoose.model('UserBlock', UserBlockSchema);
+const UserXP = mongoose.model('UserXP', UserXPSchema);
+const GameScore = mongoose.model('GameScore', GameScoreSchema);
 
 const PendingNotification = mongoose.model('PendingNotification', PendingNotificationSchema);
 
@@ -3986,6 +4028,323 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
       success: false, 
       error: 'Failed to send message' 
     });
+  }
+});
+
+// ========= GAMES API ENDPOINTS =========
+
+// Get game config (subscription check)
+app.get('/api/games/config', authRequired, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    
+    // Teachers can't play
+    if (user.role === 'TEACHER') {
+      return res.json({
+        success: true,
+        config: {
+          canPlay: false,
+          isTeacher: true,
+          message: 'Teachers can only view leaderboards'
+        }
+      });
+    }
+    
+    // Check subscription
+    const hasSubscription = user.subscriptionStatus === 'active' || user.subscriptionStatus === 'trial';
+    const isExpired = user.subscriptionExpiry && new Date() > new Date(user.subscriptionExpiry);
+    
+    // Free: 5 games/day, Premium: unlimited
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const todayGamesCount = await GameScore.countDocuments({
+      userId: req.userId,
+      playedAt: { $gte: today }
+    });
+    
+    const gamesRemaining = (hasSubscription && !isExpired) ? -1 : Math.max(0, 5 - todayGamesCount);
+    
+    // Get XP
+    let userXP = await UserXP.findOne({ userId: req.userId });
+    if (!userXP) {
+      userXP = await UserXP.create({ userId: req.userId });
+    }
+    
+    res.json({
+      success: true,
+      config: {
+        hasSubscription: hasSubscription && !isExpired,
+        gamesRemaining,
+        canPlay: (hasSubscription && !isExpired) || gamesRemaining > 0,
+        availableGames: ['quiz', 'math', 'memory', 'hangman'],
+        totalXP: userXP.totalXP,
+        level: userXP.level,
+        gamesPlayed: userXP.gamesPlayed
+      }
+    });
+  } catch (err) {
+    console.error('Get config error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Submit score
+app.post('/api/games/score', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const { gameType, score, xpEarned, difficulty, questionsAnswered, correctAnswers, timeTaken } = req.body;
+    
+    const validGames = ['quiz', 'math', 'memory', 'hangman'];
+    if (!validGames.includes(gameType)) {
+      return res.status(400).json({ success: false, message: 'Invalid game type' });
+    }
+    
+    const user = await User.findById(req.userId).select('name');
+    
+    const gameScore = new GameScore({
+      userId: req.userId,
+      username: user.name,
+      gameType,
+      score,
+      xpEarned,
+      difficulty: difficulty || 'medium',
+      questionsAnswered: questionsAnswered || 0,
+      correctAnswers: correctAnswers || 0,
+      timeTaken: timeTaken || 0,
+      playedAt: new Date()
+    });
+    
+    await gameScore.save();
+    
+    // Update XP
+    let userXP = await UserXP.findOne({ userId: req.userId });
+    if (!userXP) {
+      userXP = new UserXP({ userId: req.userId });
+    }
+    
+    userXP.totalXP += xpEarned;
+    userXP.gamesPlayed += 1;
+    userXP[`${gameType}XP`] = (userXP[`${gameType}XP`] || 0) + xpEarned;
+    userXP.level = Math.floor(Math.sqrt(userXP.totalXP / 100)) + 1;
+    userXP.lastUpdated = new Date();
+    
+    await userXP.save();
+    
+    res.json({
+      success: true,
+      message: 'Score saved',
+      scoreId: gameScore._id,
+      totalXP: userXP.totalXP,
+      level: userXP.level
+    });
+  } catch (err) {
+    console.error('Submit score error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Class leaderboard
+app.get('/api/games/leaderboard/class/:teacherId', authRequired, async (req, res) => {
+  try {
+    const { teacherId } = req.params;
+    const { gameType } = req.query;
+    
+    // Verify access
+    if (req.role === 'STUDENT') {
+      const link = await TeacherStudentLink.findOne({
+        teacherId: teacherId,
+        studentId: req.userId,
+        isActive: true
+      });
+      
+      if (!link) {
+        return res.status(403).json({ success: false, message: 'Not linked to this teacher' });
+      }
+    } else if (req.role === 'TEACHER') {
+      if (teacherId !== req.userId) {
+        return res.status(403).json({ success: false, message: 'Not authorized' });
+      }
+    }
+    
+    // Get students
+    const links = await TeacherStudentLink.find({
+      teacherId: teacherId,
+      isActive: true
+    }).select('studentId');
+    
+    const studentIds = links.map(l => l.studentId);
+    
+    if (studentIds.length === 0) {
+      return res.json({ success: true, leaderboard: [] });
+    }
+    
+    // Build query
+    let scoreQuery = { userId: { $in: studentIds } };
+    if (gameType && gameType !== 'all') {
+      scoreQuery.gameType = gameType;
+    }
+    
+    // Get scores
+    const scores = await GameScore.find(scoreQuery)
+      .populate('userId', 'name studentCode')
+      .sort({ score: -1, playedAt: -1 })
+      .lean();
+    
+    // Group by user
+    const userScores = {};
+    scores.forEach(score => {
+      const userId = score.userId._id.toString();
+      if (!userScores[userId]) {
+        userScores[userId] = {
+          userId: userId,
+          username: score.userId.name,
+          studentCode: score.userId.studentCode,
+          totalScore: 0,
+          totalXP: 0,
+          gamesPlayed: 0,
+          lastPlayed: score.playedAt
+        };
+      }
+      userScores[userId].totalScore += score.score;
+      userScores[userId].totalXP += score.xpEarned;
+      userScores[userId].gamesPlayed += 1;
+      if (score.playedAt > userScores[userId].lastPlayed) {
+        userScores[userId].lastPlayed = score.playedAt;
+      }
+    });
+    
+    // Sort and rank
+    let leaderboard = Object.values(userScores).sort((a, b) => b.totalXP - a.totalXP);
+    leaderboard = leaderboard.map((entry, index) => ({ ...entry, rank: index + 1 }));
+    
+    res.json({ success: true, leaderboard });
+  } catch (err) {
+    console.error('Class leaderboard error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// World leaderboard
+app.get('/api/games/leaderboard/world', authRequired, async (req, res) => {
+  try {
+    const { gameType, limit = 100 } = req.query;
+    
+    let query = {};
+    if (gameType && gameType !== 'all') {
+      query.gameType = gameType;
+    }
+    
+    const pipeline = [
+      { $match: query },
+      {
+        $group: {
+          _id: '$userId',
+          username: { $first: '$username' },
+          totalScore: { $sum: '$score' },
+          totalXP: { $sum: '$xpEarned' },
+          gamesPlayed: { $sum: 1 },
+          lastPlayed: { $max: '$playedAt' }
+        }
+      },
+      { $sort: { totalXP: -1 } },
+      { $limit: parseInt(limit) }
+    ];
+    
+    const results = await GameScore.aggregate(pipeline);
+    
+    const userIds = results.map(r => r._id);
+    const users = await User.find({ _id: { $in: userIds } }).select('name studentCode role').lean();
+    
+    const userMap = {};
+    users.forEach(u => { userMap[u._id.toString()] = u; });
+    
+    const leaderboard = results.map((result, index) => {
+      const user = userMap[result._id.toString()];
+      return {
+        rank: index + 1,
+        userId: result._id.toString(),
+        username: result.username,
+        studentCode: user?.studentCode,
+        role: user?.role,
+        totalScore: result.totalScore,
+        totalXP: result.totalXP,
+        gamesPlayed: result.gamesPlayed,
+        lastPlayed: result.lastPlayed
+      };
+    });
+    
+    res.json({ success: true, leaderboard });
+  } catch (err) {
+    console.error('World leaderboard error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Get student's teachers (for leaderboard selection)
+app.get('/api/games/my-teachers', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const links = await TeacherStudentLink.find({
+      studentId: req.userId,
+      isActive: true
+    })
+    .populate('teacherId', 'name email avatar')
+    .lean();
+    
+    const teachers = links.map(link => ({
+      id: link.teacherId._id.toString(),
+      name: link.teacherId.name,
+      email: link.teacherId.email,
+      avatar: link.teacherId.avatar
+    }));
+    
+    res.json({ success: true, teachers });
+  } catch (err) {
+    console.error('My teachers error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Game history
+app.get('/api/games/history', authRequired, async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (page - 1) * limit;
+    
+    const scores = await GameScore.find({ userId: req.userId })
+      .sort({ playedAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+    
+    const total = await GameScore.countDocuments({ userId: req.userId });
+    
+    res.json({
+      success: true,
+      history: scores.map(s => ({
+        id: s._id.toString(),
+        gameType: s.gameType,
+        score: s.score,
+        xpEarned: s.xpEarned,
+        difficulty: s.difficulty,
+        questionsAnswered: s.questionsAnswered,
+        correctAnswers: s.correctAnswers,
+        timeTaken: s.timeTaken,
+        playedAt: s.playedAt
+      })),
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (err) {
+    console.error('Game history error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
