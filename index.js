@@ -4190,9 +4190,9 @@ app.get('/api/games/leaderboard/class/:teacherId', authRequired, async (req, res
     
     // Get scores
     const scores = await GameScore.find(scoreQuery)
-      .populate('userId', 'name studentCode')
-      .sort({ score: -1, playedAt: -1 })
-      .lean();
+  .populate('userId', 'name')  // Only name for privacy
+  .sort({ score: -1, playedAt: -1 })
+  .lean();
     
     // Group by user
     const userScores = {};
@@ -4202,7 +4202,6 @@ app.get('/api/games/leaderboard/class/:teacherId', authRequired, async (req, res
         userScores[userId] = {
           userId: userId,
           username: score.userId.name,
-          studentCode: score.userId.studentCode,
           totalScore: 0,
           totalXP: 0,
           gamesPlayed: 0,
@@ -4268,8 +4267,6 @@ app.get('/api/games/leaderboard/world', authRequired, async (req, res) => {
         rank: index + 1,
         userId: result._id.toString(),
         username: result.username,
-        studentCode: user?.studentCode,
-        role: user?.role,
         totalScore: result.totalScore,
         totalXP: result.totalXP,
         gamesPlayed: result.gamesPlayed,
