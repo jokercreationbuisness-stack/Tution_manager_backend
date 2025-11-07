@@ -5059,6 +5059,7 @@ app.put('/api/teacher/group-classes/:id', authRequired, requireRole('TEACHER'), 
 });
 
 // Start group class (teacher)
+// Start group class (teacher) - FIXED VERSION
 app.post('/api/teacher/group-classes/:id/start', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const groupClass = await GroupClass.findOne({ _id: req.params.id, teacherId: req.userId });
@@ -5066,20 +5067,31 @@ app.post('/api/teacher/group-classes/:id/start', authRequired, requireRole('TEAC
       return res.status(404).json({ error: 'Group class not found' });
     }
     
+    // Update class status
     groupClass.status = 'LIVE';
     groupClass.startedAt = new Date();
     await groupClass.save();
     
-    // Create host participant
-    await GroupCallParticipant.create({
-      sessionId: groupClass.sessionId,
-      userId: req.userId,
-      role: 'HOST',
-      socketId: connectedUsers.get(req.userId),
-      connectionState: 'CONNECTED',
-      isVideoEnabled: true,
-      isAudioEnabled: true
-    });
+    // ✅ FIX: Use findOneAndUpdate with upsert to handle rejoining
+    await GroupCallParticipant.findOneAndUpdate(
+      { 
+        sessionId: groupClass.sessionId, 
+        userId: req.userId 
+      },
+      {
+        role: 'HOST',
+        socketId: connectedUsers.get(req.userId),
+        connectionState: 'CONNECTED',
+        isVideoEnabled: true,
+        isAudioEnabled: true,
+        joinedAt: new Date(),
+        leftAt: null  // Clear leftAt in case of rejoin
+      },
+      { 
+        upsert: true,  // Create if doesn't exist, update if it does
+        new: true 
+      }
+    );
     
     // Notify all students
     let studentIds = [];
@@ -5106,6 +5118,8 @@ app.post('/api/teacher/group-classes/:id/start', authRequired, requireRole('TEAC
         { groupClassId: groupClass._id, sessionId: groupClass.sessionId }
       );
     }
+    
+    console.log(`✅ Class ${groupClass._id} started by teacher ${req.userId}`);
     
     res.json({ 
       success: true, 
@@ -5157,43 +5171,60 @@ app.post('/api/student/group-classes/:id/join', authRequired, requireRole('STUDE
       return res.status(404).json({ error: 'Class not found' });
     }
     
+    // Check if class is live
     if (groupClass.status !== 'LIVE') {
       return res.status(400).json({ error: 'Class is not live' });
     }
     
-    // Check authorization
+    // Check if student is linked to the teacher
     const isLinked = await ensureTeacherOwnsStudent(groupClass.teacherId, req.userId);
     if (!isLinked) {
-      return res.status(403).json({ error: 'Not authorized' });
+      return res.status(403).json({ error: 'Not authorized to join this class' });
     }
     
+    // Check if student is enrolled (for non-all-students classes)
     if (!groupClass.isForAllStudents && !groupClass.studentIds.some(id => id.toString() === req.userId)) {
       return res.status(403).json({ error: 'Not enrolled in this class' });
     }
     
-    // Create participant
-    await GroupCallParticipant.findOneAndUpdate(
+    // ✅ FIX: Use findOneAndUpdate with upsert to handle rejoining
+    const participant = await GroupCallParticipant.findOneAndUpdate(
       { sessionId: groupClass.sessionId, userId: req.userId },
       {
         role: 'PARTICIPANT',
         socketId: connectedUsers.get(req.userId),
         connectionState: 'CONNECTED',
-        joinedAt: new Date()
+        isVideoEnabled: false,
+        isAudioEnabled: false,
+        isScreenSharing: false,
+        isHandRaised: false,
+        isVideoMutedByHost: false,
+        isAudioMutedByHost: false,
+        joinedAt: new Date(),
+        leftAt: null  // Clear leftAt in case of rejoin
       },
       { upsert: true, new: true }
     );
     
+    console.log(`✅ Student ${req.userId} joined class ${groupClass._id} (session: ${groupClass.sessionId})`);
+    
     res.json({
       success: true,
       sessionId: groupClass.sessionId,
+      classId: groupClass._id.toString(),
       teacherId: groupClass.teacherId.toString(),
+      title: groupClass.title,
+      subject: groupClass.subject,
       settings: {
         allowStudentVideo: groupClass.allowStudentVideo,
         allowStudentAudio: groupClass.allowStudentAudio,
         allowChat: groupClass.allowChat,
         allowScreenShare: groupClass.allowScreenShare,
         allowWhiteboard: groupClass.allowWhiteboard
-      }
+      },
+      duration: groupClass.duration,
+      startedAt: groupClass.startedAt,
+      message: 'Successfully joined class'
     });
   } catch (error) {
     console.error('Join group class error:', error);
