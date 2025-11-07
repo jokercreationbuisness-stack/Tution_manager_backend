@@ -362,6 +362,93 @@ const UserBlockSchema = new Schema({
 });
 UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
 
+// ========= SECTION & GROUP CLASS SCHEMAS =========
+
+// Section Schema - for grouping students
+const SectionSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  name: { type: String, required: true },
+  description: { type: String },
+  colorHex: { type: String, default: '#3B82F6' },
+  studentIds: [{ type: Types.ObjectId, ref: 'User' }],
+  isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+SectionSchema.index({ teacherId: 1, name: 1 });
+
+// Group Class Schema
+const GroupClassSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  title: { type: String, required: true },
+  subject: { type: String, required: true },
+  description: { type: String },
+  scheduledAt: { type: Date, required: true, index: true },
+  duration: { type: Number, required: true, default: 60 },
+  sectionId: { type: Types.ObjectId, ref: 'Section' },
+  studentIds: [{ type: Types.ObjectId, ref: 'User' }],
+  isForAllStudents: { type: Boolean, default: false },
+  allowStudentVideo: { type: Boolean, default: true },
+  allowStudentAudio: { type: Boolean, default: true },
+  allowChat: { type: Boolean, default: true },
+  allowScreenShare: { type: Boolean, default: false },
+  allowWhiteboard: { type: Boolean, default: true },
+  recordSession: { type: Boolean, default: false },
+  status: { type: String, enum: ['SCHEDULED', 'LIVE', 'ENDED', 'CANCELLED'], default: 'SCHEDULED' },
+  startedAt: { type: Date },
+  endedAt: { type: Date },
+  sessionId: { type: String, unique: true, sparse: true },
+  recordingUrl: { type: String },
+  colorHex: { type: String, default: '#10B981' },
+  notes: { type: String },
+  isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+GroupClassSchema.index({ teacherId: 1, scheduledAt: 1 });
+
+// Group Call Participant Schema
+const GroupCallParticipantSchema = new Schema({
+  sessionId: { type: String, required: true, index: true },
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  role: { type: String, enum: ['HOST', 'PARTICIPANT'], required: true },
+  peerId: { type: String },
+  socketId: { type: String },
+  isVideoEnabled: { type: Boolean, default: false },
+  isAudioEnabled: { type: Boolean, default: false },
+  isScreenSharing: { type: Boolean, default: false },
+  isHandRaised: { type: Boolean, default: false },
+  isVideoMutedByHost: { type: Boolean, default: false },
+  isAudioMutedByHost: { type: Boolean, default: false },
+  connectionState: { type: String, enum: ['CONNECTING', 'CONNECTED', 'DISCONNECTED'], default: 'CONNECTING' },
+  joinedAt: { type: Date, default: Date.now },
+  leftAt: { type: Date }
+});
+GroupCallParticipantSchema.index({ sessionId: 1, userId: 1 }, { unique: true });
+
+// Class Chat Message Schema
+const ClassChatMessageSchema = new Schema({
+  sessionId: { type: String, required: true, index: true },
+  senderId: { type: Types.ObjectId, ref: 'User', required: true },
+  senderName: { type: String, required: true },
+  message: { type: String, required: true },
+  type: { type: String, enum: ['TEXT', 'FILE', 'SYSTEM'], default: 'TEXT' },
+  fileUrl: { type: String },
+  isPrivate: { type: Boolean, default: false },
+  recipientId: { type: Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now }
+});
+ClassChatMessageSchema.index({ sessionId: 1, createdAt: 1 });
+
+// Whiteboard Data Schema
+const WhiteboardDataSchema = new Schema({
+  sessionId: { type: String, required: true, unique: true },
+  strokes: { type: Schema.Types.Mixed, default: [] },
+  images: { type: Schema.Types.Mixed, default: [] },
+  lastUpdatedBy: { type: Types.ObjectId, ref: 'User' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
 // ========= GAME SCHEMAS (ADD AFTER UserBlockSchema) =========
 
 // User XP Tracking
@@ -426,6 +513,11 @@ const Message = mongoose.model('Message', MessageSchema);
 const UserBlock = mongoose.model('UserBlock', UserBlockSchema);
 const UserXP = mongoose.model('UserXP', UserXPSchema);
 const GameScore = mongoose.model('GameScore', GameScoreSchema);
+const Section = mongoose.model('Section', SectionSchema);
+const GroupClass = mongoose.model('GroupClass', GroupClassSchema);
+const GroupCallParticipant = mongoose.model('GroupCallParticipant', GroupCallParticipantSchema);
+const ClassChatMessage = mongoose.model('ClassChatMessage', ClassChatMessageSchema);
+const WhiteboardData = mongoose.model('WhiteboardData', WhiteboardDataSchema);
 
 const PendingNotification = mongoose.model('PendingNotification', PendingNotificationSchema);
 
@@ -1052,13 +1144,12 @@ io.on('connection', (socket) => {
   });
 
   // ========= ADD CALL NOTIFICATION HANDLER RIGHT HERE =========
-  socket.on('call-not-answered', async (data) => {
+    socket.on('call-not-answered', async (data) => {
     try {
       const { callerId, receiverId, isVideo, conversationId } = data;
       const receiverSocketId = onlineUsers.get(receiverId);
       
       if (!receiverSocketId) {
-        // Receiver was OFFLINE - store missed call
         const caller = await User.findById(callerId);
         await PendingNotification.create({
           userId: receiverId,
@@ -1077,10 +1168,305 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========= GROUP CLASS SOCKET HANDLERS =========
+  
+  socket.on('join-group-class', async (data) => {
+    try {
+      const { sessionId } = data;
+      if (!socket.userId) {
+        socket.emit('error', { error: 'Not authenticated' });
+        return;
+      }
+      socket.join(sessionId);
+      const participant = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId }).populate('userId', 'name avatar role');
+      if (!participant) {
+        socket.emit('error', { error: 'Not authorized for this class' });
+        return;
+      }
+      participant.socketId = socket.id;
+      participant.connectionState = 'CONNECTED';
+      await participant.save();
+      socket.to(sessionId).emit('participant-joined', {
+        userId: socket.userId,
+        name: participant.userId.name,
+        avatar: participant.userId.avatar,
+        role: participant.role
+      });
+      const allParticipants = await GroupCallParticipant.find({ sessionId, connectionState: 'CONNECTED' }).populate('userId', 'name avatar role');
+      socket.emit('current-participants', {
+        participants: allParticipants.map(p => ({
+          userId: p.userId._id.toString(),
+          name: p.userId.name,
+          avatar: p.userId.avatar,
+          role: p.role,
+          isVideoEnabled: p.isVideoEnabled,
+          isAudioEnabled: p.isAudioEnabled,
+          isScreenSharing: p.isScreenSharing,
+          isHandRaised: p.isHandRaised
+        }))
+      });
+    } catch (error) {
+      console.error('Join group class error:', error);
+      socket.emit('error', { error: 'Failed to join class' });
+    }
+  });
+  
+  socket.on('leave-group-class', async (data) => {
+    try {
+      const { sessionId } = data;
+      socket.leave(sessionId);
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { leftAt: new Date(), connectionState: 'DISCONNECTED' });
+      socket.to(sessionId).emit('participant-left', { userId: socket.userId });
+    } catch (error) {
+      console.error('Leave group class error:', error);
+    }
+  });
+  
+  socket.on('group-offer', async (data) => {
+    try {
+      const { targetUserId, offer } = data;
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('group-offer', { fromUserId: socket.userId, offer });
+      }
+    } catch (error) {
+      console.error('Group offer error:', error);
+    }
+  });
+  
+  socket.on('group-answer', async (data) => {
+    try {
+      const { targetUserId, answer } = data;
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('group-answer', { fromUserId: socket.userId, answer });
+      }
+    } catch (error) {
+      console.error('Group answer error:', error);
+    }
+  });
+  
+  socket.on('group-ice-candidate', async (data) => {
+    try {
+      const { targetUserId, candidate } = data;
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('group-ice-candidate', { fromUserId: socket.userId, candidate });
+      }
+    } catch (error) {
+      console.error('Group ICE candidate error:', error);
+    }
+  });
+  
+  socket.on('toggle-video', async (data) => {
+    try {
+      const { sessionId, enabled } = data;
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isVideoEnabled: enabled });
+      socket.to(sessionId).emit('participant-video-toggle', { userId: socket.userId, enabled });
+    } catch (error) {
+      console.error('Toggle video error:', error);
+    }
+  });
+  
+  socket.on('toggle-audio', async (data) => {
+    try {
+      const { sessionId, enabled } = data;
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isAudioEnabled: enabled });
+      socket.to(sessionId).emit('participant-audio-toggle', { userId: socket.userId, enabled });
+    } catch (error) {
+      console.error('Toggle audio error:', error);
+    }
+  });
+  
+  socket.on('toggle-screen-share', async (data) => {
+    try {
+      const { sessionId, enabled } = data;
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isScreenSharing: enabled });
+      socket.to(sessionId).emit('participant-screen-share-toggle', { userId: socket.userId, enabled });
+    } catch (error) {
+      console.error('Toggle screen share error:', error);
+    }
+  });
+  
+  socket.on('raise-hand', async (data) => {
+    try {
+      const { sessionId, raised } = data;
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isHandRaised: raised });
+      socket.to(sessionId).emit('participant-hand-raised', { userId: socket.userId, raised });
+    } catch (error) {
+      console.error('Raise hand error:', error);
+    }
+  });
+  
+  socket.on('host-mute-participant', async (data) => {
+    try {
+      const { sessionId, targetUserId, muted } = data;
+      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
+      if (!host) {
+        socket.emit('error', { error: 'Not authorized' });
+        return;
+      }
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { isAudioMutedByHost: muted, isAudioEnabled: !muted });
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('host-muted-you', { muted });
+      }
+      io.to(sessionId).emit('participant-audio-toggle', { userId: targetUserId, enabled: !muted });
+    } catch (error) {
+      console.error('Host mute error:', error);
+    }
+  });
+  
+  socket.on('host-disable-video-participant', async (data) => {
+    try {
+      const { sessionId, targetUserId, disabled } = data;
+      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
+      if (!host) {
+        socket.emit('error', { error: 'Not authorized' });
+        return;
+      }
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { isVideoMutedByHost: disabled, isVideoEnabled: !disabled });
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('host-disabled-your-video', { disabled });
+      }
+      io.to(sessionId).emit('participant-video-toggle', { userId: targetUserId, enabled: !disabled });
+    } catch (error) {
+      console.error('Host disable video error:', error);
+    }
+  });
+  
+  socket.on('host-remove-participant', async (data) => {
+    try {
+      const { sessionId, targetUserId } = data;
+      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
+      if (!host) {
+        socket.emit('error', { error: 'Not authorized' });
+        return;
+      }
+      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { leftAt: new Date(), connectionState: 'DISCONNECTED' });
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('removed-by-host');
+      }
+      io.to(sessionId).emit('participant-left', { userId: targetUserId });
+    } catch (error) {
+      console.error('Host remove participant error:', error);
+    }
+  });
+  
+  socket.on('host-mute-all', async (data) => {
+    try {
+      const { sessionId } = data;
+      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
+      if (!host) {
+        socket.emit('error', { error: 'Not authorized' });
+        return;
+      }
+      await GroupCallParticipant.updateMany({ sessionId, role: 'PARTICIPANT' }, { isAudioMutedByHost: true, isAudioEnabled: false });
+      io.to(sessionId).emit('host-muted-all');
+    } catch (error) {
+      console.error('Host mute all error:', error);
+    }
+  });
+  
+  socket.on('host-update-settings', async (data) => {
+    try {
+      const { sessionId, settings } = data;
+      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
+      if (!host) {
+        socket.emit('error', { error: 'Not authorized' });
+        return;
+      }
+      const groupClass = await GroupClass.findOne({ sessionId });
+      if (groupClass) {
+        if (settings.allowStudentVideo !== undefined) groupClass.allowStudentVideo = settings.allowStudentVideo;
+        if (settings.allowStudentAudio !== undefined) groupClass.allowStudentAudio = settings.allowStudentAudio;
+        if (settings.allowChat !== undefined) groupClass.allowChat = settings.allowChat;
+        if (settings.allowScreenShare !== undefined) groupClass.allowScreenShare = settings.allowScreenShare;
+        if (settings.allowWhiteboard !== undefined) groupClass.allowWhiteboard = settings.allowWhiteboard;
+        await groupClass.save();
+      }
+      io.to(sessionId).emit('settings-updated', settings);
+    } catch (error) {
+      console.error('Host update settings error:', error);
+    }
+  });
+  
+  socket.on('class-chat-message', async (data) => {
+    try {
+      const { sessionId, message, isPrivate, recipientId } = data;
+      const user = await User.findById(socket.userId).select('name avatar');
+      const chatMessage = await ClassChatMessage.create({
+        sessionId,
+        senderId: socket.userId,
+        senderName: user.name,
+        message,
+        isPrivate: isPrivate || false,
+        recipientId: recipientId || null
+      });
+      const messageData = {
+        id: chatMessage._id.toString(),
+        senderId: socket.userId,
+        senderName: user.name,
+        senderAvatar: user.avatar,
+        message,
+        isPrivate,
+        timestamp: chatMessage.createdAt
+      };
+      if (isPrivate && recipientId) {
+        const recipientSocketId = connectedUsers.get(recipientId);
+        if (recipientSocketId) {
+          io.to(recipientSocketId).emit('class-chat-message', messageData);
+        }
+        socket.emit('class-chat-message', messageData);
+      } else {
+        io.to(sessionId).emit('class-chat-message', messageData);
+      }
+    } catch (error) {
+      console.error('Class chat message error:', error);
+    }
+  });
+  
+  socket.on('whiteboard-draw', async (data) => {
+    try {
+      const { sessionId, stroke } = data;
+      await WhiteboardData.findOneAndUpdate({ sessionId }, { $push: { strokes: stroke }, lastUpdatedBy: socket.userId, updatedAt: new Date() }, { upsert: true });
+      socket.to(sessionId).emit('whiteboard-draw', { userId: socket.userId, stroke });
+    } catch (error) {
+      console.error('Whiteboard draw error:', error);
+    }
+  });
+  
+  socket.on('whiteboard-clear', async (data) => {
+    try {
+      const { sessionId } = data;
+      await WhiteboardData.findOneAndUpdate({ sessionId }, { strokes: [], images: [], lastUpdatedBy: socket.userId, updatedAt: new Date() }, { upsert: true });
+      io.to(sessionId).emit('whiteboard-cleared', { userId: socket.userId });
+    } catch (error) {
+      console.error('Whiteboard clear error:', error);
+    }
+  });
+  
+  socket.on('whiteboard-undo', async (data) => {
+    try {
+      const { sessionId } = data;
+      const whiteboard = await WhiteboardData.findOne({ sessionId });
+      if (whiteboard && whiteboard.strokes.length > 0) {
+        whiteboard.strokes.pop();
+        whiteboard.lastUpdatedBy = socket.userId;
+        whiteboard.updatedAt = new Date();
+        await whiteboard.save();
+        socket.to(sessionId).emit('whiteboard-undo', { userId: socket.userId });
+      }
+    } catch (error) {
+      console.error('Whiteboard undo error:', error);
+    }
+  });
+
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
-    // Handle active calls on disconnect
     if (socket.userId && activeCalls.has(socket.userId)) {
       const otherUserId = activeCalls.get(socket.userId);
       activeCalls.delete(socket.userId);
@@ -4342,6 +4728,532 @@ app.get('/api/games/history', authRequired, async (req, res) => {
   } catch (err) {
     console.error('Game history error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ========= SECTION MANAGEMENT ENDPOINTS =========
+
+// Get all sections
+app.get('/api/teacher/sections', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const sections = await Section.find({ 
+      teacherId: req.userId,
+      isActive: true 
+    })
+    .populate('studentIds', 'name email studentCode avatar')
+    .sort({ name: 1 })
+    .lean();
+    
+    const formatted = sections.map(section => ({
+      id: section._id.toString(),
+      name: section.name,
+      description: section.description,
+      colorHex: section.colorHex,
+      studentCount: section.studentIds.length,
+      students: section.studentIds.map(s => ({
+        id: s._id.toString(),
+        name: s.name,
+        email: s.email,
+        studentCode: s.studentCode,
+        avatar: s.avatar
+      })),
+      createdAt: section.createdAt
+    }));
+    
+    res.json({ success: true, sections: formatted });
+  } catch (error) {
+    console.error('Get sections error:', error);
+    res.status(500).json({ error: 'Failed to fetch sections' });
+  }
+});
+
+// Create section
+app.post('/api/teacher/sections', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { name, description, colorHex, studentIds } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: 'Section name is required' });
+    }
+    
+    if (studentIds && studentIds.length > 0) {
+      for (const studentId of studentIds) {
+        const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+        if (!isLinked) {
+          return res.status(403).json({ error: `Not authorized for student ${studentId}` });
+        }
+      }
+    }
+    
+    const section = await Section.create({
+      teacherId: req.userId,
+      name,
+      description: description || '',
+      colorHex: colorHex || '#3B82F6',
+      studentIds: studentIds || []
+    });
+    
+    res.status(201).json({ success: true, sectionId: section._id.toString() });
+  } catch (error) {
+    console.error('Create section error:', error);
+    res.status(500).json({ error: 'Failed to create section' });
+  }
+});
+
+// Update section
+app.put('/api/teacher/sections/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { name, description, colorHex, studentIds } = req.body;
+    
+    const section = await Section.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!section) {
+      return res.status(404).json({ error: 'Section not found' });
+    }
+    
+    if (studentIds) {
+      for (const studentId of studentIds) {
+        const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+        if (!isLinked) {
+          return res.status(403).json({ error: `Not authorized for student ${studentId}` });
+        }
+      }
+      section.studentIds = studentIds;
+    }
+    
+    if (name) section.name = name;
+    if (description !== undefined) section.description = description;
+    if (colorHex) section.colorHex = colorHex;
+    section.updatedAt = new Date();
+    
+    await section.save();
+    res.status(204).send();
+  } catch (error) {
+    console.error('Update section error:', error);
+    res.status(500).json({ error: 'Failed to update section' });
+  }
+});
+
+// Delete section
+app.delete('/api/teacher/sections/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const section = await Section.findOneAndUpdate(
+      { _id: req.params.id, teacherId: req.userId },
+      { isActive: false },
+      { new: true }
+    );
+    
+    if (!section) {
+      return res.status(404).json({ error: 'Section not found' });
+    }
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error('Delete section error:', error);
+    res.status(500).json({ error: 'Failed to delete section' });
+  }
+});
+
+// ========= GROUP CLASS ENDPOINTS =========
+
+// Get all group classes for teacher
+app.get('/api/teacher/group-classes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const classes = await GroupClass.find({ 
+      teacherId: req.userId,
+      isActive: true 
+    })
+    .populate('sectionId', 'name')
+    .populate('studentIds', 'name studentCode')
+    .sort({ scheduledAt: -1 })
+    .lean();
+    
+    const formatted = classes.map(cls => ({
+      id: cls._id.toString(),
+      title: cls.title,
+      subject: cls.subject,
+      description: cls.description,
+      scheduledAt: cls.scheduledAt,
+      duration: cls.duration,
+      sectionName: cls.sectionId?.name,
+      studentCount: cls.isForAllStudents ? 'All Students' : cls.studentIds.length,
+      status: cls.status,
+      sessionId: cls.sessionId,
+      settings: {
+        allowStudentVideo: cls.allowStudentVideo,
+        allowStudentAudio: cls.allowStudentAudio,
+        allowChat: cls.allowChat,
+        allowScreenShare: cls.allowScreenShare,
+        allowWhiteboard: cls.allowWhiteboard
+      },
+      createdAt: cls.createdAt
+    }));
+    
+    res.json({ success: true, classes: formatted });
+  } catch (error) {
+    console.error('Get group classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch group classes' });
+  }
+});
+
+// Get upcoming group classes for student
+app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({ success: true, classes: [] });
+    }
+    
+    const now = new Date();
+    const classes = await GroupClass.find({
+      teacherId: { $in: linkedTeacherIds },
+      isActive: true,
+      scheduledAt: { $gte: now },
+      $or: [
+        { isForAllStudents: true },
+        { studentIds: studentId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .sort({ scheduledAt: 1 })
+    .lean();
+    
+    const formatted = classes.map(cls => ({
+      id: cls._id.toString(),
+      title: cls.title,
+      subject: cls.subject,
+      description: cls.description,
+      scheduledAt: cls.scheduledAt,
+      duration: cls.duration,
+      teacherName: cls.teacherId.name,
+      teacherAvatar: cls.teacherId.avatar,
+      status: cls.status,
+      sessionId: cls.sessionId,
+      canJoin: cls.status === 'LIVE',
+      colorHex: cls.colorHex
+    }));
+    
+    res.json({ success: true, classes: formatted });
+  } catch (error) {
+    console.error('Get student group classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch group classes' });
+  }
+});
+
+// Create group class
+app.post('/api/teacher/group-classes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const {
+      title, subject, description, scheduledAt, duration,
+      sectionId, studentIds, isForAllStudents,
+      allowStudentVideo, allowStudentAudio, allowChat,
+      allowScreenShare, allowWhiteboard, recordSession,
+      colorHex, notes
+    } = req.body;
+    
+    if (!title || !subject || !scheduledAt) {
+      return res.status(400).json({ error: 'Title, subject, and scheduled time are required' });
+    }
+    
+    // Verify students
+    if (!isForAllStudents) {
+      const studentsToVerify = studentIds || [];
+      for (const studentId of studentsToVerify) {
+        const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
+        if (!isLinked) {
+          return res.status(403).json({ error: `Not authorized for student ${studentId}` });
+        }
+      }
+    }
+    
+    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    const groupClass = await GroupClass.create({
+      teacherId: req.userId,
+      title,
+      subject,
+      description: description || '',
+      scheduledAt: new Date(scheduledAt),
+      duration: duration || 60,
+      sectionId: sectionId || null,
+      studentIds: isForAllStudents ? [] : (studentIds || []),
+      isForAllStudents: isForAllStudents || false,
+      allowStudentVideo: allowStudentVideo !== false,
+      allowStudentAudio: allowStudentAudio !== false,
+      allowChat: allowChat !== false,
+      allowScreenShare: allowScreenShare || false,
+      allowWhiteboard: allowWhiteboard !== false,
+      recordSession: recordSession || false,
+      sessionId,
+      colorHex: colorHex || '#10B981',
+      notes: notes || ''
+    });
+    
+    // Notify students
+    let studentsToNotify = [];
+    if (isForAllStudents) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      studentsToNotify = links.map(l => l.studentId);
+    } else if (sectionId) {
+      const section = await Section.findById(sectionId);
+      if (section) studentsToNotify = section.studentIds;
+    } else {
+      studentsToNotify = studentIds || [];
+    }
+    
+    for (const studentId of studentsToNotify) {
+      await createNotification(
+        studentId,
+        'CLASS',
+        'New Online Class Scheduled',
+        `${title} scheduled for ${new Date(scheduledAt).toLocaleString()}`,
+        { groupClassId: groupClass._id, sessionId }
+      );
+    }
+    
+    res.status(201).json({ 
+      success: true, 
+      classId: groupClass._id.toString(),
+      sessionId 
+    });
+  } catch (error) {
+    console.error('Create group class error:', error);
+    res.status(500).json({ error: 'Failed to create group class' });
+  }
+});
+
+// Update group class
+app.put('/api/teacher/group-classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Group class not found' });
+    }
+    
+    const {
+      title, subject, description, scheduledAt, duration,
+      allowStudentVideo, allowStudentAudio, allowChat,
+      allowScreenShare, allowWhiteboard
+    } = req.body;
+    
+    if (title) groupClass.title = title;
+    if (subject) groupClass.subject = subject;
+    if (description !== undefined) groupClass.description = description;
+    if (scheduledAt) groupClass.scheduledAt = new Date(scheduledAt);
+    if (duration) groupClass.duration = duration;
+    if (allowStudentVideo !== undefined) groupClass.allowStudentVideo = allowStudentVideo;
+    if (allowStudentAudio !== undefined) groupClass.allowStudentAudio = allowStudentAudio;
+    if (allowChat !== undefined) groupClass.allowChat = allowChat;
+    if (allowScreenShare !== undefined) groupClass.allowScreenShare = allowScreenShare;
+    if (allowWhiteboard !== undefined) groupClass.allowWhiteboard = allowWhiteboard;
+    
+    groupClass.updatedAt = new Date();
+    await groupClass.save();
+    
+    res.status(204).send();
+  } catch (error) {
+    console.error('Update group class error:', error);
+    res.status(500).json({ error: 'Failed to update group class' });
+  }
+});
+
+// Start group class (teacher)
+app.post('/api/teacher/group-classes/:id/start', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Group class not found' });
+    }
+    
+    groupClass.status = 'LIVE';
+    groupClass.startedAt = new Date();
+    await groupClass.save();
+    
+    // Create host participant
+    await GroupCallParticipant.create({
+      sessionId: groupClass.sessionId,
+      userId: req.userId,
+      role: 'HOST',
+      socketId: connectedUsers.get(req.userId),
+      connectionState: 'CONNECTED',
+      isVideoEnabled: true,
+      isAudioEnabled: true
+    });
+    
+    // Notify all students
+    let studentIds = [];
+    if (groupClass.isForAllStudents) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      studentIds = links.map(l => l.studentId.toString());
+    } else {
+      studentIds = groupClass.studentIds.map(id => id.toString());
+    }
+    
+    for (const studentId of studentIds) {
+      io.to(studentId).emit('class_started', {
+        classId: groupClass._id.toString(),
+        sessionId: groupClass.sessionId,
+        title: groupClass.title,
+        teacherId: req.userId
+      });
+      
+      await createNotification(
+        studentId,
+        'CLASS',
+        'Class Started',
+        `${groupClass.title} is now live!`,
+        { groupClassId: groupClass._id, sessionId: groupClass.sessionId }
+      );
+    }
+    
+    res.json({ 
+      success: true, 
+      sessionId: groupClass.sessionId,
+      message: 'Class started successfully' 
+    });
+  } catch (error) {
+    console.error('Start group class error:', error);
+    res.status(500).json({ error: 'Failed to start class' });
+  }
+});
+
+// End group class
+app.post('/api/teacher/group-classes/:id/end', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Group class not found' });
+    }
+    
+    groupClass.status = 'ENDED';
+    groupClass.endedAt = new Date();
+    await groupClass.save();
+    
+    // Update all participants
+    await GroupCallParticipant.updateMany(
+      { sessionId: groupClass.sessionId, leftAt: null },
+      { leftAt: new Date(), connectionState: 'DISCONNECTED' }
+    );
+    
+    // Notify all participants
+    io.to(groupClass.sessionId).emit('class_ended', {
+      classId: groupClass._id.toString(),
+      sessionId: groupClass.sessionId
+    });
+    
+    res.json({ success: true, message: 'Class ended successfully' });
+  } catch (error) {
+    console.error('End group class error:', error);
+    res.status(500).json({ error: 'Failed to end class' });
+  }
+});
+
+// Join group class (student)
+app.post('/api/student/group-classes/:id/join', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findById(req.params.id);
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    if (groupClass.status !== 'LIVE') {
+      return res.status(400).json({ error: 'Class is not live' });
+    }
+    
+    // Check authorization
+    const isLinked = await ensureTeacherOwnsStudent(groupClass.teacherId, req.userId);
+    if (!isLinked) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    if (!groupClass.isForAllStudents && !groupClass.studentIds.some(id => id.toString() === req.userId)) {
+      return res.status(403).json({ error: 'Not enrolled in this class' });
+    }
+    
+    // Create participant
+    await GroupCallParticipant.findOneAndUpdate(
+      { sessionId: groupClass.sessionId, userId: req.userId },
+      {
+        role: 'PARTICIPANT',
+        socketId: connectedUsers.get(req.userId),
+        connectionState: 'CONNECTED',
+        joinedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+    
+    res.json({
+      success: true,
+      sessionId: groupClass.sessionId,
+      teacherId: groupClass.teacherId.toString(),
+      settings: {
+        allowStudentVideo: groupClass.allowStudentVideo,
+        allowStudentAudio: groupClass.allowStudentAudio,
+        allowChat: groupClass.allowChat,
+        allowScreenShare: groupClass.allowScreenShare,
+        allowWhiteboard: groupClass.allowWhiteboard
+      }
+    });
+  } catch (error) {
+    console.error('Join group class error:', error);
+    res.status(500).json({ error: 'Failed to join class' });
+  }
+});
+
+// Get class details
+app.get('/api/group-classes/:sessionId', authRequired, async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ sessionId: req.params.sessionId })
+      .populate('teacherId', 'name avatar')
+      .lean();
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    // Get participants
+    const participants = await GroupCallParticipant.find({ 
+      sessionId: req.params.sessionId,
+      connectionState: 'CONNECTED'
+    })
+    .populate('userId', 'name avatar role')
+    .lean();
+    
+    res.json({
+      success: true,
+      class: {
+        id: groupClass._id.toString(),
+        title: groupClass.title,
+        subject: groupClass.subject,
+        teacher: {
+          id: groupClass.teacherId._id.toString(),
+          name: groupClass.teacherId.name,
+          avatar: groupClass.teacherId.avatar
+        },
+        status: groupClass.status,
+        settings: {
+          allowStudentVideo: groupClass.allowStudentVideo,
+          allowStudentAudio: groupClass.allowStudentAudio,
+          allowChat: groupClass.allowChat,
+          allowScreenShare: groupClass.allowScreenShare,
+          allowWhiteboard: groupClass.allowWhiteboard
+        },
+        participants: participants.map(p => ({
+          userId: p.userId._id.toString(),
+          name: p.userId.name,
+          avatar: p.userId.avatar,
+          role: p.role,
+          isVideoEnabled: p.isVideoEnabled,
+          isAudioEnabled: p.isAudioEnabled,
+          isScreenSharing: p.isScreenSharing,
+          isHandRaised: p.isHandRaised
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Get class details error:', error);
+    res.status(500).json({ error: 'Failed to fetch class details' });
   }
 });
 
