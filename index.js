@@ -119,15 +119,15 @@ const UserSchema = new Schema({
   lastLogin: { type: Date },
   isOnline: { type: Boolean, default: false },
   lastSeen: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now }, // ← ADD COMMA HERE
   subscriptionStatus: { 
-  type: String, 
-  enum: ['free', 'trial', 'active', 'expired'], 
-  default: 'free' 
-},
-subscriptionExpiry: { type: Date },
-totalGameXP: { type: Number, default: 0 },
-gamesPlayed: { type: Number, default: 0 }
+    type: String, 
+    enum: ['free', 'trial', 'active', 'expired'], 
+    default: 'free' 
+  },
+  subscriptionExpiry: { type: Date },
+  totalGameXP: { type: Number, default: 0 },
+  gamesPlayed: { type: Number, default: 0 }
 });
 
 // Teacher-Student Link
