@@ -1531,6 +1531,129 @@ app.get('/api/teacher/rankings', authRequired, requireRole('TEACHER'), async (re
   }
 });
 
+// ========= STUDENT RANKINGS ENDPOINT =========
+// GET /api/student/rankings - Get rankings for student across all their teachers
+app.get('/api/student/rankings', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const studentId = req.userId;
+
+    // Get all linked teachers
+    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    if (linkedTeacherIds.length === 0) {
+      return res.json({
+        success: true,
+        rankings: []
+      });
+    }
+
+    // Get all results for this student from all their teachers
+    const results = await Result.find({
+      teacherId: { $in: linkedTeacherIds },
+      studentId: studentId,
+      published: true
+    })
+    .populate('teacherId', 'name')
+    .populate('examId')
+    .sort({ publishedAt: -1 })
+    .lean();
+
+    if (!results || results.length === 0) {
+      return res.json({
+        success: true,
+        rankings: []
+      });
+    }
+
+    // Group results by teacher and exam
+    const teacherRankingsMap = {};
+    
+    for (const result of results) {
+      const teacherId = result.teacherId._id.toString();
+      const teacherName = result.teacherId.name;
+      
+      if (!teacherRankingsMap[teacherId]) {
+        teacherRankingsMap[teacherId] = {
+          teacherId: teacherId,
+          teacherName: teacherName,
+          exams: []
+        };
+      }
+      
+      // Get all results for this exam to determine ranking
+      const examKey = result.examId?._id?.toString() || result.examTitle;
+      const allExamResults = await Result.find({
+        teacherId: teacherId,
+        $or: [
+          { examId: result.examId },
+          { examTitle: result.examTitle, subject: result.subject }
+        ],
+        published: true
+      })
+      .populate('studentId', 'name studentCode')
+      .sort({ obtainedMarks: -1, percentage: -1 })
+      .lean();
+      
+      // Calculate rankings
+      const sortedResults = allExamResults
+        .map(r => ({
+          studentId: r.studentId?._id?.toString() || '',
+          studentName: r.studentId?.name || 'Unknown',
+          obtainedMarks: parseFloat(r.obtainedMarks),
+          totalMarks: parseFloat(r.totalMarks),
+          percentage: parseFloat(r.percentage || ((r.obtainedMarks / r.totalMarks) * 100)),
+          grade: r.grade || calculateGrade((r.obtainedMarks / r.totalMarks) * 100)
+        }))
+        .sort((a, b) => b.percentage - a.percentage);
+      
+      // Assign ranks
+      let currentRank = 1;
+      const rankedStudents = sortedResults.map((student, index) => {
+        if (index > 0 && student.percentage < sortedResults[index - 1].percentage) {
+          currentRank = index + 1;
+        }
+        return {
+          rank: currentRank,
+          studentId: student.studentId,
+          studentName: student.studentName,
+          obtainedMarks: student.obtainedMarks,
+          totalMarks: student.totalMarks,
+          percentage: parseFloat(student.percentage.toFixed(2)),
+          grade: student.grade,
+          isCurrentStudent: student.studentId === studentId.toString()
+        };
+      });
+      
+      // Find current student's rank
+      const myRanking = rankedStudents.find(r => r.isCurrentStudent);
+      
+      teacherRankingsMap[teacherId].exams.push({
+        examTitle: result.examTitle,
+        subject: result.subject || 'General',
+        date: result.publishedAt || result.createdAt,
+        totalStudents: rankedStudents.length,
+        rankings: rankedStudents
+      });
+    }
+
+    // Convert map to array
+    const rankings = Object.values(teacherRankingsMap);
+
+    res.json({
+      success: true,
+      rankings: rankings
+    });
+
+  } catch (error) {
+    console.error('Student rankings error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch rankings',
+      rankings: []
+    });
+  }
+});
+
 app.delete('/api/teacher/students/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const studentId = req.params.id;
