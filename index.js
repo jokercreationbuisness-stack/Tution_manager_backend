@@ -2317,7 +2317,8 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
       return res.json({ success: true, classes: [] });
     }
     
-    const classes = await ClassModel.find({
+    // ========= FETCH REGULAR CLASSES =========
+    const regularClasses = await ClassModel.find({
       teacherId: { $in: linkedTeacherIds },
       isActive: true,
       $or: [
@@ -2329,8 +2330,36 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
     .sort({ dayOfWeek: 1, startTime: 1 })
     .lean();
     
-    const formatted = classes.map(c => ({
+    // ========= FETCH GROUP CLASSES =========
+    // Find sections this student is in
+    const studentSections = await Section.find({
+      teacherId: { $in: linkedTeacherIds },
+      studentIds: studentId,
+      isActive: true
+    }).select('_id');
+    
+    const sectionIds = studentSections.map(s => s._id);
+    
+    // Get group classes where student is eligible
+    const groupClasses = await GroupClass.find({
+      teacherId: { $in: linkedTeacherIds },
+      isActive: true,
+      status: { $in: ['SCHEDULED', 'LIVE'] }, // Only show upcoming/active classes
+      $or: [
+        { isForAllStudents: true }, // Classes for all students
+        { studentIds: studentId }, // Directly assigned to student
+        { sectionId: { $in: sectionIds } } // Student's section is assigned
+      ]
+    })
+    .populate('teacherId', 'name')
+    .populate('sectionId', 'name')
+    .sort({ scheduledAt: 1 })
+    .lean();
+    
+    // ========= FORMAT REGULAR CLASSES =========
+    const formattedRegularClasses = regularClasses.map(c => ({
       id: c._id.toString(),
+      type: 'REGULAR', // ✅ Add type field
       subject: c.subject || c.title,
       title: c.title,
       dayOfWeek: c.dayOfWeek,
@@ -2343,7 +2372,48 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
       scope: c.scope
     }));
     
-    res.json({ success: true, classes: formatted });
+    // ========= FORMAT GROUP CLASSES =========
+    const formattedGroupClasses = groupClasses.map(c => ({
+      id: c._id.toString(),
+      type: 'GROUP', // ✅ Add type field
+      subject: c.subject,
+      title: c.title,
+      description: c.description,
+      scheduledAt: c.scheduledAt.toISOString(),
+      duration: c.duration,
+      colorHex: c.colorHex || '#10B981',
+      notes: c.notes,
+      teacherName: c.teacherId?.name,
+      sectionName: c.sectionId?.name,
+      status: c.status,
+      sessionId: c.sessionId,
+      // Settings
+      allowStudentVideo: c.allowStudentVideo,
+      allowStudentAudio: c.allowStudentAudio,
+      allowChat: c.allowChat,
+      allowScreenShare: c.allowScreenShare,
+      allowWhiteboard: c.allowWhiteboard,
+      // Times
+      startedAt: c.startedAt?.toISOString(),
+      endedAt: c.endedAt?.toISOString()
+    }));
+    
+    // ========= COMBINE BOTH =========
+    const allClasses = [
+      ...formattedRegularClasses,
+      ...formattedGroupClasses
+    ];
+    
+    res.json({ 
+      success: true, 
+      classes: allClasses,
+      summary: {
+        regularClasses: formattedRegularClasses.length,
+        groupClasses: formattedGroupClasses.length,
+        total: allClasses.length
+      }
+    });
+    
   } catch (error) {
     console.error('Student classes error:', error);
     res.status(500).json({ error: 'Failed to fetch classes' });
