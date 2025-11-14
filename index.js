@@ -1464,6 +1464,143 @@ io.on('connection', (socket) => {
     }
   });
 
+  // WebRTC Offer
+  socket.on('webrtc-offer', async (data) => {
+    try {
+      const { sessionId, targetUserId, offer } = data;
+      
+      if (!socket.userId) {
+        socket.emit('error', { error: 'Not authenticated' });
+        return;
+      }
+
+      // Find target participant's socket
+      const targetParticipant = await GroupCallParticipant.findOne({
+        sessionId,
+        userId: targetUserId,
+        connectionState: 'CONNECTED'
+      });
+
+      if (!targetParticipant || !targetParticipant.socketId) {
+        console.log(`⚠️ Target user ${targetUserId} not found or not connected`);
+        return;
+      }
+
+      // Forward offer to target user
+      io.to(targetParticipant.socketId).emit('webrtc-offer', {
+        fromUserId: socket.userId,
+        offer: offer
+      });
+
+      console.log(`📤 Forwarded offer from ${socket.userId} to ${targetUserId}`);
+
+    } catch (error) {
+      console.error('❌ WebRTC offer error:', error);
+    }
+  });
+
+  // WebRTC Answer
+  socket.on('webrtc-answer', async (data) => {
+    try {
+      const { sessionId, targetUserId, answer } = data;
+      
+      if (!socket.userId) {
+        socket.emit('error', { error: 'Not authenticated' });
+        return;
+      }
+
+      // Find target participant's socket
+      const targetParticipant = await GroupCallParticipant.findOne({
+        sessionId,
+        userId: targetUserId,
+        connectionState: 'CONNECTED'
+      });
+
+      if (!targetParticipant || !targetParticipant.socketId) {
+        console.log(`⚠️ Target user ${targetUserId} not found or not connected`);
+        return;
+      }
+
+      // Forward answer to target user
+      io.to(targetParticipant.socketId).emit('webrtc-answer', {
+        fromUserId: socket.userId,
+        answer: answer
+      });
+
+      console.log(`📤 Forwarded answer from ${socket.userId} to ${targetUserId}`);
+
+    } catch (error) {
+      console.error('❌ WebRTC answer error:', error);
+    }
+  });
+
+  // ICE Candidate
+  socket.on('ice-candidate', async (data) => {
+    try {
+      const { sessionId, targetUserId, candidate } = data;
+      
+      if (!socket.userId) {
+        socket.emit('error', { error: 'Not authenticated' });
+        return;
+      }
+
+      // Find target participant's socket
+      const targetParticipant = await GroupCallParticipant.findOne({
+        sessionId,
+        userId: targetUserId,
+        connectionState: 'CONNECTED'
+      });
+
+      if (!targetParticipant || !targetParticipant.socketId) {
+        return;
+      }
+
+      // Forward ICE candidate to target user
+      io.to(targetParticipant.socketId).emit('ice-candidate', {
+        fromUserId: socket.userId,
+        candidate: candidate
+      });
+
+    } catch (error) {
+      console.error('❌ ICE candidate error:', error);
+    }
+  });
+
+  // Media state updates (video/audio/screen share)
+  socket.on('media-state-changed', async (data) => {
+    try {
+      const { sessionId, isVideoEnabled, isAudioEnabled, isScreenSharing } = data;
+      
+      if (!socket.userId) {
+        socket.emit('error', { error: 'Not authenticated' });
+        return;
+      }
+
+      // Update participant state
+      await GroupCallParticipant.findOneAndUpdate(
+        { sessionId, userId: socket.userId },
+        {
+          isVideoEnabled: isVideoEnabled !== undefined ? isVideoEnabled : undefined,
+          isAudioEnabled: isAudioEnabled !== undefined ? isAudioEnabled : undefined,
+          isScreenSharing: isScreenSharing !== undefined ? isScreenSharing : undefined
+        }
+      );
+
+      // Broadcast to all other participants in the session
+      socket.to(sessionId).emit('participant-media-changed', {
+        userId: socket.userId,
+        isVideoEnabled,
+        isAudioEnabled,
+        isScreenSharing
+      });
+
+      console.log(`📡 Media state changed for ${socket.userId}: video=${isVideoEnabled}, audio=${isAudioEnabled}, screen=${isScreenSharing}`);
+
+    } catch (error) {
+      console.error('❌ Media state change error:', error);
+    }
+  });
+
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
