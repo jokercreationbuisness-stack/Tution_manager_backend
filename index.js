@@ -852,8 +852,6 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // ... rest of your existing code
-
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       socket.emit('message_error', { error: 'Conversation not found', tempId });
@@ -1167,6 +1165,219 @@ io.on('connection', (socket) => {
       console.error('❌ Error storing missed call:', error);
     }
   });
+
+  // ========= 🆕 GROUP CALL HANDLERS =========
+  
+  socket.on('join-group-call', async (data) => {
+    try {
+      console.log('📞 join-group-call received:', data);
+      
+      if (!socket.userId) {
+        socket.emit('call_error', { error: 'Not authenticated' });
+        return;
+      }
+
+      const payload = typeof data === 'string' ? JSON.parse(data) : data;
+      const { sessionId, userId, userName, role } = payload;
+
+      if (!sessionId) {
+        socket.emit('call_error', { error: 'Session ID required' });
+        return;
+      }
+
+      // Find the group class
+      const groupClass = await GroupClass.findOne({ sessionId });
+      if (!groupClass) {
+        socket.emit('call_error', { error: 'Group class not found' });
+        return;
+      }
+
+      // Check authorization
+      const isHost = groupClass.teacherId.toString() === userId;
+      const isInvited = groupClass.isForAllStudents || 
+                       groupClass.studentIds.some(id => id.toString() === userId);
+
+      if (!isHost && !isInvited) {
+        socket.emit('call_error', { error: 'Not authorized to join this call' });
+        return;
+      }
+
+      // Join the session room
+      socket.join(`group_call_${sessionId}`);
+
+      // Create or update participant
+      await GroupCallParticipant.findOneAndUpdate(
+        { sessionId, userId },
+        {
+          sessionId,
+          userId,
+          role: isHost ? 'HOST' : 'PARTICIPANT',
+          socketId: socket.id,
+          connectionState: 'CONNECTED',
+          joinedAt: new Date()
+        },
+        { upsert: true, new: true }
+      );
+
+      // Get all participants
+      const participants = await GroupCallParticipant.find({ 
+        sessionId,
+        leftAt: null 
+      }).populate('userId', 'name email avatar');
+
+      // Notify all participants about the new joiner
+      socket.to(`group_call_${sessionId}`).emit('participant_joined', {
+        sessionId,
+        participant: {
+          userId,
+          userName,
+          role: isHost ? 'HOST' : 'PARTICIPANT',
+          socketId: socket.id
+        }
+      });
+
+      // Send current participants to the new joiner
+      socket.emit('call_joined', {
+        sessionId,
+        participants: participants.map(p => ({
+          userId: p.userId._id,
+          userName: p.userId.name,
+          role: p.role,
+          socketId: p.socketId,
+          isVideoEnabled: p.isVideoEnabled,
+          isAudioEnabled: p.isAudioEnabled,
+          isScreenSharing: p.isScreenSharing
+        }))
+      });
+
+      console.log(`✅ User ${userName} joined group call ${sessionId}`);
+
+    } catch (error) {
+      console.error('❌ join-group-call error:', error);
+      socket.emit('call_error', { error: 'Failed to join call' });
+    }
+  });
+
+  socket.on('leave-group-call', async (data) => {
+    try {
+      const payload = typeof data === 'string' ? JSON.parse(data) : data;
+      const { sessionId, userId } = payload;
+
+      if (!sessionId || !userId) return;
+
+      // Update participant
+      await GroupCallParticipant.findOneAndUpdate(
+        { sessionId, userId },
+        { 
+          leftAt: new Date(),
+          connectionState: 'DISCONNECTED'
+        }
+      );
+
+      // Leave the room
+      socket.leave(`group_call_${sessionId}`);
+
+      // Notify others
+      socket.to(`group_call_${sessionId}`).emit('participant_left', {
+        sessionId,
+        userId
+      });
+
+      console.log(`👋 User ${userId} left group call ${sessionId}`);
+
+    } catch (error) {
+      console.error('❌ leave-group-call error:', error);
+    }
+  });
+
+  socket.on('webrtc_offer', async (data) => {
+    try {
+      const { sessionId, targetUserId, offer } = data;
+      
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('webrtc_offer', {
+          sessionId,
+          fromUserId: socket.userId,
+          offer
+        });
+      }
+    } catch (error) {
+      console.error('❌ webrtc_offer error:', error);
+    }
+  });
+
+  socket.on('webrtc_answer', async (data) => {
+    try {
+      const { sessionId, targetUserId, answer } = data;
+      
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('webrtc_answer', {
+          sessionId,
+          fromUserId: socket.userId,
+          answer
+        });
+      }
+    } catch (error) {
+      console.error('❌ webrtc_answer error:', error);
+    }
+  });
+
+  socket.on('webrtc_ice_candidate', async (data) => {
+    try {
+      const { sessionId, targetUserId, candidate } = data;
+      
+      const targetSocketId = connectedUsers.get(targetUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('webrtc_ice_candidate', {
+          sessionId,
+          fromUserId: socket.userId,
+          candidate
+        });
+      }
+    } catch (error) {
+      console.error('❌ webrtc_ice_candidate error:', error);
+    }
+  });
+
+  socket.on('toggle_video', async (data) => {
+    try {
+      const { sessionId, enabled } = data;
+      
+      await GroupCallParticipant.findOneAndUpdate(
+        { sessionId, userId: socket.userId },
+        { isVideoEnabled: enabled }
+      );
+
+      socket.to(`group_call_${sessionId}`).emit('participant_video_toggle', {
+        userId: socket.userId,
+        enabled
+      });
+    } catch (error) {
+      console.error('❌ toggle_video error:', error);
+    }
+  });
+
+  socket.on('toggle_audio', async (data) => {
+    try {
+      const { sessionId, enabled } = data;
+      
+      await GroupCallParticipant.findOneAndUpdate(
+        { sessionId, userId: socket.userId },
+        { isAudioEnabled: enabled }
+      );
+
+      socket.to(`group_call_${sessionId}`).emit('participant_audio_toggle', {
+        userId: socket.userId,
+        enabled
+      });
+    } catch (error) {
+      console.error('❌ toggle_audio error:', error);
+    }
+  });
+
+  // ========= END OF GROUP CALL HANDLERS =========
 
   // ========= GROUP CLASS SOCKET HANDLERS =========
   
