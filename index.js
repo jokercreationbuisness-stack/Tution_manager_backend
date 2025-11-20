@@ -4287,6 +4287,55 @@ app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), asy
   }
 });
 
+// Get group classes for student
+app.get('/api/group-classes', authenticateToken, async (req, res) => {
+    try {
+        const { role, userId } = req.user;
+        
+        let query = {};
+        if (role === 'STUDENT') {
+            query = { students: userId };
+        } else if (role === 'TEACHER') {
+            query = { teacher: userId };
+        }
+        
+        const classes = await GroupClass.find(query)
+            .populate('teacher', 'name avatar')
+            .sort({ startTime: -1 });
+            
+        res.json({ success: true, classes });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Join by student code
+app.post('/api/group-classes/join-by-code', authenticateToken, async (req, res) => {
+    try {
+        const { code } = req.body;
+        const { userId, role } = req.user;
+        
+        if (role !== 'STUDENT') {
+            return res.status(403).json({ success: false, message: 'Students only' });
+        }
+        
+        const groupClass = await GroupClass.findOne({ studentCode: code });
+        
+        if (!groupClass) {
+            return res.status(404).json({ success: false, message: 'Invalid code' });
+        }
+        
+        if (!groupClass.students.includes(userId)) {
+            groupClass.students.push(userId);
+            await groupClass.save();
+        }
+        
+        res.json({ success: true, class: groupClass });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 // ========= ATTENDANCE MANAGEMENT =========
 app.post('/api/teacher/attendance', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
