@@ -4288,50 +4288,130 @@ app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), asy
 });
 
 // Get group classes for student
+// Get group classes for student - FIXED VERSION
 app.get('/api/group-classes', authRequired, async (req, res) => {
     try {
-        const { role, userId } = req.user;
+        const role = req.role;
+        const userId = req.userId;
         
-        let query = {};
+        let query = {
+            isActive: true,
+            status: { $in: ['SCHEDULED', 'LIVE'] }
+        };
+        
         if (role === 'STUDENT') {
-            query = { students: userId };
+            // Get linked teachers
+            const linkedTeacherIds = await getLinkedTeacherIds(userId);
+            
+            if (linkedTeacherIds.length === 0) {
+                return res.json({ success: true, classes: [] });
+            }
+            
+            // Find sections this student is in
+            const studentSections = await Section.find({
+                teacherId: { $in: linkedTeacherIds },
+                studentIds: userId,
+                isActive: true
+            }).select('_id');
+            
+            const sectionIds = studentSections.map(s => s._id);
+            
+            // Query for group classes
+            query.teacherId = { $in: linkedTeacherIds };
+            query.$or = [
+                { isForAllStudents: true },
+                { studentIds: userId },
+                { sectionId: { $in: sectionIds } }
+            ];
         } else if (role === 'TEACHER') {
-            query = { teacher: userId };
+            query.teacherId = userId;
         }
         
         const classes = await GroupClass.find(query)
-            .populate('teacher', 'name avatar')
-            .sort({ startTime: -1 });
+            .populate('teacherId', 'name avatar')
+            .populate('sectionId', 'name')
+            .sort({ scheduledAt: 1 });
+        
+        // Format response
+        const formatted = classes.map(cls => ({
+            id: cls._id.toString(),
+            title: cls.title,
+            subject: cls.subject,
+            description: cls.description,
+            scheduledAt: cls.scheduledAt,
+            duration: cls.duration,
+            teacherName: cls.teacherId?.name,
+            teacherAvatar: cls.teacherId?.avatar,
+            sectionName: cls.sectionId?.name,
+            status: cls.status,
+            sessionId: cls.sessionId,
+            colorHex: cls.colorHex || '#10B981',
+            allowStudentVideo: cls.allowStudentVideo,
+            allowStudentAudio: cls.allowStudentAudio,
+            allowChat: cls.allowChat,
+            allowScreenShare: cls.allowScreenShare,
+            allowWhiteboard: cls.allowWhiteboard
+        }));
             
-        res.json({ success: true, classes });
+        res.json({ success: true, classes: formatted });
     } catch (error) {
+        console.error('Get group classes error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 // Join by student code
+// Join by student code - FIXED
 app.post('/api/group-classes/join-by-code', authRequired, async (req, res) => {
     try {
         const { code } = req.body;
-        const { userId, role } = req.user;
+        const userId = req.userId;
+        const role = req.role;
         
         if (role !== 'STUDENT') {
             return res.status(403).json({ success: false, message: 'Students only' });
         }
         
-        const groupClass = await GroupClass.findOne({ studentCode: code });
-        
-        if (!groupClass) {
-            return res.status(404).json({ success: false, message: 'Invalid code' });
+        if (!code || code.length !== 6) {
+            return res.status(400).json({ success: false, message: 'Valid 6-digit code required' });
         }
         
-        if (!groupClass.students.includes(userId)) {
-            groupClass.students.push(userId);
+        // Find group class by session ID (not studentCode)
+        const groupClass = await GroupClass.findOne({ 
+            sessionId: { $regex: code, $options: 'i' },
+            isActive: true,
+            status: { $in: ['SCHEDULED', 'LIVE'] }
+        }).populate('teacherId', 'name');
+        
+        if (!groupClass) {
+            return res.status(404).json({ success: false, message: 'Invalid or expired class code' });
+        }
+        
+        // Check if student is linked to teacher
+        const isLinked = await ensureTeacherOwnsStudent(groupClass.teacherId._id, userId);
+        if (!isLinked) {
+            return res.status(403).json({ success: false, message: 'You must be linked to this teacher first' });
+        }
+        
+        // Add student if not already enrolled
+        if (!groupClass.studentIds.includes(userId)) {
+            groupClass.studentIds.push(userId);
             await groupClass.save();
         }
         
-        res.json({ success: true, class: groupClass });
+        res.json({ 
+            success: true, 
+            class: {
+                id: groupClass._id.toString(),
+                title: groupClass.title,
+                subject: groupClass.subject,
+                sessionId: groupClass.sessionId,
+                scheduledAt: groupClass.scheduledAt
+            },
+            message: 'Successfully joined class!'
+        });
     } catch (error) {
+        console.error('Join by code error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
