@@ -1182,15 +1182,17 @@ io.on('connection', (socket) => {
   let currentSessionIdInCall = null;
 
   // JOIN GROUP CALL
+    // JOIN GROUP CALL (with deduplication)
   socket.on('join-group-call', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled, isScreenSharing } = payload;
 
-      console.log(`📞 User ${userName} joining group call ${sessionId}`);
+      console.log(`📞 User ${userName} (${userId}) joining group call ${sessionId}`);
 
-      currentUserIdInCall = userId;
-      currentSessionIdInCall = sessionId;
+      // Store on socket object
+      socket.currentUserIdInCall = userId;
+      socket.currentSessionIdInCall = sessionId;
 
       // Join socket room
       socket.join(sessionId);
@@ -1206,6 +1208,29 @@ io.on('connection', (socket) => {
       }
 
       const callSession = activeCallSessions.get(sessionId);
+      
+      // ✅ DEDUPLICATION: Check if already joined
+      if (callSession.participants.has(userId)) {
+        console.log(`⚠️ User ${userName} already in call, skipping duplicate join`);
+        // Just send existing participants again (in case of reconnect)
+        const existingParticipants = Array.from(callSession.participants.values())
+          .filter(p => p.userId !== userId)
+          .map(p => ({
+            userId: p.userId,
+            name: p.userName,
+            role: p.role,
+            isVideoEnabled: p.isVideoEnabled,
+            isAudioEnabled: p.isAudioEnabled,
+            isScreenSharing: p.isScreenSharing,
+            isHandRaised: p.isHandRaised
+          }));
+        
+        socket.emit('existing-participants', {
+          participants: existingParticipants,
+          hostJoined: callSession.hostJoined
+        });
+        return; // ← Exit early
+      }
       
       // Check if this is the host joining
       const isHost = role === 'HOST' || userId === callSession.hostUserId;
@@ -1246,7 +1271,7 @@ io.on('connection', (socket) => {
       // Send existing participants AND hostJoined status to the new user
       socket.emit('existing-participants', {
         participants: existingParticipants,
-        hostJoined: callSession.hostJoined  // ← KEY FIX: Tell student if host is present
+        hostJoined: callSession.hostJoined
       });
 
       // Notify others about new participant (after small delay)
@@ -1268,8 +1293,8 @@ io.on('connection', (socket) => {
       socket.emit('group-call-error', { message: error.message });
     }
   });
-
   // WEBRTC OFFER
+    // WEBRTC OFFER
   socket.on('webrtc-offer', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1280,7 +1305,7 @@ io.on('connection', (socket) => {
         const targetParticipant = callSession.participants.get(targetUserId);
         if (targetParticipant) {
           io.to(targetParticipant.socketId).emit('webrtc-offer', {
-            fromUserId: currentUserIdInCall,
+            fromUserId: socket.currentUserIdInCall,
             offer
           });
         }
@@ -1301,7 +1326,7 @@ io.on('connection', (socket) => {
         const targetParticipant = callSession.participants.get(targetUserId);
         if (targetParticipant) {
           io.to(targetParticipant.socketId).emit('webrtc-answer', {
-            fromUserId: currentUserIdInCall,
+            fromUserId: socket.currentUserIdInCall,
             answer
           });
         }
@@ -1322,7 +1347,7 @@ io.on('connection', (socket) => {
         const targetParticipant = callSession.participants.get(targetUserId);
         if (targetParticipant) {
           io.to(targetParticipant.socketId).emit('webrtc-ice-candidate', {
-            fromUserId: currentUserIdInCall,
+            fromUserId: socket.currentUserIdInCall,
             candidate
           });
         }
@@ -1366,6 +1391,7 @@ io.on('connection', (socket) => {
   });
 
   // END GROUP CALL (Only host can end for everyone)
+    // END GROUP CALL (Only host can end for everyone)
   socket.on('end-group-call', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1374,7 +1400,7 @@ io.on('connection', (socket) => {
       console.log(`🛑 Host ending group call ${sessionId}`);
 
       const callSession = activeCallSessions.get(sessionId);
-      if (callSession && currentUserIdInCall === callSession.hostUserId) {
+      if (callSession && socket.currentUserIdInCall === callSession.hostUserId) {
         // Update class status
         await GroupClass.findOneAndUpdate(
           { sessionId },
@@ -1911,9 +1937,10 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', async (reason) => {
+    socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
+    // 1-on-1 call cleanup
     if (socket.userId && activeCalls.has(socket.userId)) {
       const otherUserId = activeCalls.get(socket.userId);
       activeCalls.delete(socket.userId);
@@ -1926,6 +1953,7 @@ io.on('connection', (socket) => {
       }
     }
     
+    // User online status cleanup
     if (socket.userId) {
       connectedUsers.delete(socket.userId);
       onlineUsers.delete(socket.userId);
@@ -1941,35 +1969,40 @@ io.on('connection', (socket) => {
       });
     }
 
-    // ========= ADD THIS SECTION HERE =========
-    // Group call cleanup on disconnect
-    if (currentSessionIdInCall && currentUserIdInCall) {
-      const callSession = activeCallSessions.get(currentSessionIdInCall);
+    // ========= GROUP CALL CLEANUP =========
+    if (socket.currentSessionIdInCall && socket.currentUserIdInCall) {
+      const callSession = activeCallSessions.get(socket.currentSessionIdInCall);
       if (callSession) {
-        const wasHost = currentUserIdInCall === callSession.hostUserId;
+        const wasHost = socket.currentUserIdInCall === callSession.hostUserId;
         
-        callSession.participants.delete(currentUserIdInCall);
+        callSession.participants.delete(socket.currentUserIdInCall);
         
         if (wasHost) {
           callSession.hostJoined = false;
-          io.to(currentSessionIdInCall).emit('host-left', {
+          io.to(socket.currentSessionIdInCall).emit('host-left', {
             message: 'Host has disconnected'
           });
+          console.log(`👋 Host left ${socket.currentSessionIdInCall}`);
         } else {
-          io.to(currentSessionIdInCall).emit('participant-left', {
-            userId: currentUserIdInCall
+          io.to(socket.currentSessionIdInCall).emit('participant-left', {
+            userId: socket.currentUserIdInCall
           });
+          console.log(`👋 Participant ${socket.currentUserIdInCall} left ${socket.currentSessionIdInCall}`);
         }
 
+        // Only end session if NO participants remain
         if (callSession.participants.size === 0) {
-          console.log(`🛑 Group call ${currentSessionIdInCall} ended (no participants)`);
-          activeCallSessions.delete(currentSessionIdInCall);
+          console.log(`🛑 Group call ${socket.currentSessionIdInCall} ended (no participants)`);
+          activeCallSessions.delete(socket.currentSessionIdInCall);
+          await GroupClass.findOneAndUpdate(
+            { sessionId: socket.currentSessionIdInCall },
+            { status: 'ENDED', endedAt: new Date() }
+          );
         }
       }
     }
-    // ========= END OF GROUP CALL CLEANUP =========
+    // ========= END GROUP CALL CLEANUP =========
   });
-
   socket.on('error', (error) => {
     console.error('❌ Socket error:', error);
   });
