@@ -4288,7 +4288,7 @@ app.delete('/api/teacher/results/:id', authRequired, requireRole('TEACHER'), asy
 });
 
 // Get group classes for student
-app.get('/api/group-classes', authenticateToken, async (req, res) => {
+app.get('/api/group-classes', authRequired, async (req, res) => {
     try {
         const { role, userId } = req.user;
         
@@ -4310,7 +4310,7 @@ app.get('/api/group-classes', authenticateToken, async (req, res) => {
 });
 
 // Join by student code
-app.post('/api/group-classes/join-by-code', authenticateToken, async (req, res) => {
+app.post('/api/group-classes/join-by-code', authRequired, async (req, res) => {
     try {
         const { code } = req.body;
         const { userId, role } = req.user;
