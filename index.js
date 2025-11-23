@@ -5199,6 +5199,68 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
   }
 });
 
+// ========= WEBRTC TURN CREDENTIALS API =========
+app.get('/api/webrtc/turn-credentials', authRequired, async (req, res) => {
+  try {
+    // Build ICE servers configuration
+    const iceServers = [
+      // Google STUN servers (public, no auth needed)
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+      
+      // Additional STUN servers
+      { urls: 'stun:stun.stunprotocol.org:3478' },
+      { urls: 'stun:stun.voipbuster.com:3478' },
+      { urls: 'stun:stun.voipstunt.com:3478' },
+      
+      // YOUR NEW TURN SERVER (from environment variables)
+      {
+        urls: [
+          'turn:' + (process.env.TURN_SERVER_URL || 'turn.example.com:3478'),
+          'turns:' + (process.env.TURN_SERVER_URL || 'turn.example.com:5349')
+        ],
+        username: process.env.TURN_USERNAME || '1',
+        credential: process.env.TURN_PASSWORD || 'pyKIyWpQE+jpjV7VzYgx3tQE='
+      },
+      
+      // Fallback TURN servers (Xirsys)
+      {
+        urls: [
+          'turn:bn-turn1.xirsys.com:80?transport=udp',
+          'turn:bn-turn1.xirsys.com:3478?transport=udp'
+        ],
+        username: process.env.XIRSYS_USERNAME || 'YzYNCouZM1mhqhmseWk6',
+        credential: process.env.XIRSYS_PASSWORD || 'YzYNCouZM1mhqhmseWk6'
+      },
+      
+      // Public fallback TURN (Metered.ca)
+      {
+        urls: ['turn:openrelay.metered.ca:80'],
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
+    ];
+    
+    // Optional: Log usage for monitoring
+    console.log(`🔐 TURN credentials requested by user ${req.userId}`);
+    
+    res.json({
+      iceServers: iceServers.map(server => ({
+        urls: Array.isArray(server.urls) ? server.urls : [server.urls],
+        username: server.username || undefined,
+        credential: server.credential || undefined
+      }))
+    });
+    
+  } catch (error) {
+    console.error('TURN credentials error:', error);
+    res.status(500).json({ error: 'Failed to fetch TURN credentials' });
+  }
+});
+
 // ========= GAMES API ENDPOINTS =========
 
 // Get game config (subscription check)
