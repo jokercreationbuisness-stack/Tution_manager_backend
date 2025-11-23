@@ -1069,22 +1069,26 @@ socket.emit('message_sent', {
   });
 
   socket.on('typing', (data) => {
-    const { conversationId, receiverId } = data;
-    if (!socket.userId) return;
-    io.to(receiverId.toString()).emit('user_typing', { 
-      conversationId, 
-      userId: socket.userId 
-    });
+  const { conversationId, receiverId } = data;
+  if (!socket.userId) return;
+  
+  // ✅ FIX: Emit to conversation room
+  io.to(`conversation_${conversationId}`).emit('user_typing', { 
+    conversationId, 
+    userId: socket.userId 
   });
+});
 
-  socket.on('stop_typing', (data) => {
-    const { conversationId, receiverId } = data;
-    if (!socket.userId) return;
-    io.to(receiverId.toString()).emit('user_stop_typing', { 
-      conversationId, 
-      userId: socket.userId 
-    });
+socket.on('stop_typing', (data) => {
+  const { conversationId, receiverId } = data;
+  if (!socket.userId) return;
+  
+  // ✅ FIX: Emit to conversation room
+  io.to(`conversation_${conversationId}`).emit('user_stop_typing', { 
+    conversationId, 
+    userId: socket.userId 
   });
+});
 
   // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
   socket.on('call-user', async (data) => {
@@ -2024,10 +2028,31 @@ socket.emit('message_sent', {
         lastSeen: lastSeen
       });
       
-      io.emit('user_offline', { 
-        userId: socket.userId,
-        lastSeen: lastSeen.toISOString()
-      });
+      // ✅ FIX: Only broadcast to conversation partners, not everyone
+      try {
+        const conversations = await Conversation.find({
+          $or: [
+            { teacherId: socket.userId },
+            { studentId: socket.userId }
+          ]
+        }).lean();
+        
+        // Notify each conversation partner individually
+        for (const conv of conversations) {
+          const partnerId = conv.teacherId.toString() === socket.userId 
+            ? conv.studentId.toString() 
+            : conv.teacherId.toString();
+          
+          io.to(partnerId).emit('user_offline', { 
+            userId: socket.userId,
+            lastSeen: lastSeen.toISOString()
+          });
+        }
+        
+        console.log(`📴 User ${socket.userId} offline status sent to ${conversations.length} partners`);
+      } catch (error) {
+        console.error('Error broadcasting offline status:', error);
+      }
     }
 
     // ========= GROUP CALL CLEANUP =========
