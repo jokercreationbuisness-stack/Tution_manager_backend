@@ -913,8 +913,7 @@ const messageData = {
   mimeType: mimeType || null,
   duration: duration || null,
   iv,
-  delivered: true,        // ✅ FIX: Mark as delivered immediately
-  deliveredAt: new Date(), // ✅ FIX: Set delivery timestamp
+  delivered: false,  // ❌ Start as NOT delivered
   read: false
 };
       
