@@ -865,21 +865,23 @@ io.on('connection', (socket) => {
     }
 
     // ✅ Build message data with ALL fields
-    const messageData = {
-      conversationId,
-      senderId: socket.userId,
-      receiverId,
-      content,
-      type: type || 'TEXT',
-      fileUrl: fileUrl || null,
-      fileName: fileName || null,
-      fileSize: fileSize || null,
-      mimeType: mimeType || null,
-      duration: duration || null,
-      iv,
-      delivered: false,
-      read: false
-    };
+    // ✅ FIX: Build message data with delivered: true by default
+const messageData = {
+  conversationId,
+  senderId: socket.userId,
+  receiverId,
+  content,
+  type: type || 'TEXT',
+  fileUrl: fileUrl || null,
+  fileName: fileName || null,
+  fileSize: fileSize || null,
+  mimeType: mimeType || null,
+  duration: duration || null,
+  iv,
+  delivered: true,        // ✅ FIX: Mark as delivered immediately
+  deliveredAt: new Date(), // ✅ FIX: Set delivery timestamp
+  read: false
+};
       
       // Add replyTo if provided
       if (replyTo && replyTo.messageId) {
@@ -913,41 +915,40 @@ io.on('connection', (socket) => {
         id: populatedMessage._id.toString()
       };
 
-      io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-      
-      // ========= ADD OFFLINE CHECK =========
-      const receiverSocketId = connectedUsers.get(receiverId.toString());
-      if (receiverSocketId) {
-        // User is ONLINE - send immediately
-        io.to(receiverId.toString()).emit('new_message', messagePayload);
-        
-        await Message.findByIdAndUpdate(message._id, {
-          delivered: true,
-          deliveredAt: new Date()
-        });
-        
-        io.to(`conversation_${conversationId}`).emit('message_delivered', {
-          messageId: message._id.toString()
-        });
-      } else {
-        // User is OFFLINE - store notification
-        const sender = await User.findById(socket.userId);
-        await PendingNotification.create({
-          userId: receiverId,
-          type: 'message',
-          senderName: sender.name,
-          senderId: socket.userId,
-          senderAvatar: sender.avatar,
-          conversationId: conversationId,
-          content: content
-        });
-        console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
-      }
+      // ✅ Emit new_message to conversation room with delivered status
+io.to(`conversation_${conversationId}`).emit('new_message', {
+  ...messagePayload,
+  delivered: true,
+  deliveredAt: new Date()
+});
 
-      socket.emit('message_sent', { 
-        tempId, 
-        messageId: message._id.toString() 
-      });
+// ✅ Emit message_delivered event IMMEDIATELY to show double tick
+io.to(`conversation_${conversationId}`).emit('message_delivered', {
+  messageId: message._id.toString()
+});
+
+// Check if receiver is online to send notification
+const receiverSocketId = connectedUsers.get(receiverId.toString());
+if (!receiverSocketId) {
+  // User is OFFLINE - store notification for when they come back online
+  const sender = await User.findById(socket.userId);
+  await PendingNotification.create({
+    userId: receiverId,
+    type: 'message',
+    senderName: sender.name,
+    senderId: socket.userId,
+    senderAvatar: sender.avatar,
+    conversationId: conversationId,
+    content: content
+  });
+  console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
+}
+
+socket.emit('message_sent', { 
+  tempId, 
+  messageId: message._id.toString() 
+});
+
 
     } catch (error) {
       console.error('❌ Send message error:', error);
