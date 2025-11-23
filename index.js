@@ -798,13 +798,48 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('join_conversation', (conversationId) => {
-    if (!socket.userId) {
-      socket.emit('error', { error: 'Authentication required' });
-      return;
+  socket.on('join_conversation', async (conversationId) => {
+  if (!socket.userId) {
+    socket.emit('error', { error: 'Authentication required' });
+    return;
+  }
+  socket.join(`conversation_${conversationId}`);
+  
+  // ✅ MARK UNDELIVERED MESSAGES AS DELIVERED (single tick → double tick)
+  try {
+    const undeliveredMessages = await Message.find({
+      conversationId: conversationId,
+      receiverId: socket.userId,
+      delivered: false
+    });
+    
+    if (undeliveredMessages.length > 0) {
+      await Message.updateMany(
+        {
+          conversationId: conversationId,
+          receiverId: socket.userId,
+          delivered: false
+        },
+        {
+          $set: {
+            delivered: true,
+            deliveredAt: new Date()
+          }
+        }
+      );
+      
+      undeliveredMessages.forEach(msg => {
+        io.to(`conversation_${conversationId}`).emit('message_delivered', {
+          messageId: msg._id.toString()
+        });
+      });
+      
+      console.log(`✅ Marked ${undeliveredMessages.length} messages as delivered`);
     }
-    socket.join(`conversation_${conversationId}`);
-  });
+  } catch (error) {
+    console.error('Error marking messages as delivered:', error);
+  }
+});
 
   socket.on('leave_conversation', (conversationId) => {
     socket.leave(`conversation_${conversationId}`);
@@ -916,20 +951,36 @@ const messageData = {
       };
 
       // ✅ Emit new_message to conversation room with delivered status
-io.to(`conversation_${conversationId}`).emit('new_message', {
-  ...messagePayload,
-  delivered: true,
-  deliveredAt: new Date()
-});
-
-// ✅ Emit message_delivered event IMMEDIATELY to show double tick
-io.to(`conversation_${conversationId}`).emit('message_delivered', {
-  messageId: message._id.toString()
-});
-
-// Check if receiver is online to send notification
+// ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
 const receiverSocketId = connectedUsers.get(receiverId.toString());
-if (!receiverSocketId) {
+
+if (receiverSocketId) {
+  // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
+  await Message.findByIdAndUpdate(message._id, {
+    delivered: true,
+    deliveredAt: new Date()
+  });
+  
+  messagePayload.delivered = true;
+  messagePayload.deliveredAt = new Date();
+  
+  // Emit to conversation room with delivered status
+  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+  
+  // Emit message_delivered event for double tick
+  io.to(`conversation_${conversationId}`).emit('message_delivered', {
+    messageId: message._id.toString()
+  });
+  
+  console.log(`✅ Message delivered (online): ${message._id}`);
+} else {
+  // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
+  messagePayload.delivered = false;
+  
+  // Emit to conversation room (sender will see single tick)
+  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+  
+  // Store pending notification for offline user
   // User is OFFLINE - store notification for when they come back online
   const sender = await User.findById(socket.userId);
   await PendingNotification.create({
