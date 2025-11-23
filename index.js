@@ -679,6 +679,7 @@ const requireRole = (role) => (req, res, next) => {
 const connectedUsers = new Map();
 const activeCalls = new Map(); // Track active calls
 const onlineUsers = new Map(); // For WebRTC calls
+const disconnectTimers = new Map();
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
@@ -1249,6 +1250,17 @@ socket.on('stop_typing', (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
+
+      // ✅ ADD THESE LINES:
+    // Cancel pending disconnect if user is rejoining
+    if (disconnectTimers.has(userId)) {
+      clearTimeout(disconnectTimers.get(userId));
+      disconnectTimers.delete(userId);
+      console.log(`✅ ${userName} reconnected before timeout, canceling disconnect`);
+    }
+
+    console.log(`📞 ${userName} joining ${sessionId}`);
+    // ... rest of existing code continues
 
       console.log(`📞 ${userName} joining ${sessionId}`);
 
@@ -2056,22 +2068,34 @@ socket.on('stop_typing', (data) => {
     }
 
     // ========= GROUP CALL CLEANUP =========
-    if (socket.callSessionId && socket.callUserId) {
-      const sessionId = socket.callSessionId;
-      const userId = socket.callUserId;
-      const wasHost = socket.callRole === 'HOST';
-      
-      console.log(`👋 ${userId} disconnected from ${sessionId} (${wasHost ? 'HOST' : 'PARTICIPANT'})`);
-      
-      // Notify room
-      if (wasHost) {
-        io.to(sessionId).emit('host-left', {
-          message: 'Host has disconnected'
-        });
-      }
-      
-      io.to(sessionId).emit('participant-left', { userId });
+    // ========= GROUP CALL CLEANUP WITH GRACE PERIOD =========
+if (socket.callSessionId && socket.callUserId) {
+  const sessionId = socket.callSessionId;
+  const userId = socket.callUserId;
+  const wasHost = socket.callRole === 'HOST';
+  
+  console.log(`⏳ ${userId} disconnected from ${sessionId}, waiting 10s for reconnection...`);
+  
+  // ✅ Wait 10 seconds before marking as left
+  const timerId = setTimeout(() => {
+    console.log(`🔴 ${userId} did not reconnect, marking as left`);
+    
+    // Notify room
+    if (wasHost) {
+      io.to(sessionId).emit('host-left', {
+        message: 'Host has disconnected'
+      });
     }
+    
+    io.to(sessionId).emit('participant-left', { userId });
+    
+    // Clean up timer
+    disconnectTimers.delete(userId);
+  }, 10000); // 10 second grace period
+  
+  // Store timer so we can cancel it if user reconnects
+  disconnectTimers.set(userId, timerId);
+}
   });
   socket.on('error', (error) => {
     console.error('❌ Socket error:', error);
