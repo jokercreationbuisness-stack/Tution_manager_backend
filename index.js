@@ -5200,9 +5200,9 @@ app.post('/api/chat/messages/new', authRequired, async (req, res) => {
 });
 
 // ========= WEBRTC TURN CREDENTIALS API =========
+// ========= WEBRTC TURN CREDENTIALS API =========
 app.get('/api/webrtc/turn-credentials', authRequired, async (req, res) => {
   try {
-    // Build ICE servers configuration
     const iceServers = [
       // Google STUN servers (public, no auth needed)
       { urls: 'stun:stun.l.google.com:19302' },
@@ -5216,35 +5216,37 @@ app.get('/api/webrtc/turn-credentials', authRequired, async (req, res) => {
       { urls: 'stun:stun.voipbuster.com:3478' },
       { urls: 'stun:stun.voipstunt.com:3478' },
       
-      // YOUR NEW TURN SERVER (from environment variables)
+      // ExpressTurn TURN Server (Primary)
       {
         urls: [
-          'turn:' + (process.env.TURN_SERVER_URL || 'turn.example.com:3478'),
-          'turns:' + (process.env.TURN_SERVER_URL || 'turn.example.com:5349')
+          `turn:${process.env.EXPRESSTURN_URL || 'relay1.expressturn.com:3480'}`,
+          `turns:${process.env.EXPRESSTURN_URL || 'relay1.expressturn.com:3480'}`
         ],
-        username: process.env.TURN_USERNAME || '1',
-        credential: process.env.TURN_PASSWORD || 'pyKIyWpQE+jpjV7VzYgx3tQE='
+        username: process.env.EXPRESSTURN_USERNAME || '000000002079286307',
+        credential: process.env.EXPRESSTURN_PASSWORD || '1/1pyKIyWpQE+jpjV7VzYgx3tQE='
       },
       
-      // Fallback TURN servers (Xirsys)
+      // Xirsys TURN (Fallback #1)
       {
         urls: [
-          'turn:bn-turn1.xirsys.com:80?transport=udp',
-          'turn:bn-turn1.xirsys.com:3478?transport=udp'
+          `turn:${process.env.XIRSYS_URL || 'bn-turn1.xirsys.com'}:80?transport=udp`,
+          `turn:${process.env.XIRSYS_URL || 'bn-turn1.xirsys.com'}:3478?transport=udp`
         ],
         username: process.env.XIRSYS_USERNAME || 'YzYNCouZM1mhqhmseWk6',
         credential: process.env.XIRSYS_PASSWORD || 'YzYNCouZM1mhqhmseWk6'
       },
       
-      // Public fallback TURN (Metered.ca)
+      // Metered.ca TURN (Fallback #2 - Public)
       {
-        urls: ['turn:openrelay.metered.ca:80'],
-        username: 'openrelayproject',
-        credential: 'openrelayproject'
+        urls: [
+          `turn:${process.env.METERED_URL || 'openrelay.metered.ca'}:80`,
+          `turn:${process.env.METERED_URL || 'openrelay.metered.ca'}:443`
+        ],
+        username: process.env.METERED_USERNAME || 'openrelayproject',
+        credential: process.env.METERED_PASSWORD || 'openrelayproject'
       }
     ];
     
-    // Optional: Log usage for monitoring
     console.log(`🔐 TURN credentials requested by user ${req.userId}`);
     
     res.json({
