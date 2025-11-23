@@ -20,7 +20,11 @@ const io = socketIo(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  pingTimeout: 60000,        // Wait 60s for pong before disconnect
+  pingInterval: 25000,       // Send ping every 25s
+  upgradeTimeout: 30000,     // Connection upgrade timeout
+  transports: ['websocket', 'polling']
 });
 
 // ========= FIX: Trust proxy for Render.com =========
