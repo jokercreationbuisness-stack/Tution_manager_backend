@@ -1230,7 +1230,14 @@ socket.on('stop_typing', (data) => {
   
   // ========= ENHANCED GROUP CALL HANDLERS (ZOOM-LIKE) =========
   
-  // ========= ENHANCED GROUP CALL HANDLERS (ZOOM-LIKE) =========
+ // Store active call sessions - ADD THIS AT THE TOP OF io.on('connection')
+const activeCallSessions = new Map(); // sessionId -> { hostUserId, participants: Map(), hostJoined: boolean }
+const disconnectTimers = new Map(); // Store disconnect timers for grace period
+
+let currentUserIdInCall = null;
+let currentSessionIdInCall = null;
+
+// ========= GROUP CALL SIGNALING (FULL FEATURED, MINIMAL BACKEND) =========
 
 // Join group call
 socket.on('join-group-call', async (data) => {
@@ -1238,7 +1245,6 @@ socket.on('join-group-call', async (data) => {
     const payload = typeof data === 'string' ? JSON.parse(data) : data;
     const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
 
-    // ✅ ADD THESE LINES:
     // Cancel pending disconnect if user is rejoining
     if (disconnectTimers.has(userId)) {
       clearTimeout(disconnectTimers.get(userId));
