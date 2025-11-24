@@ -1659,6 +1659,7 @@ socket.on('disconnect', async (reason) => {
 socket.on('error', (error) => {
   console.error('❌ Socket error:', error);
 });
+  });
 // ========= ROOT & HEALTH ENDPOINTS =========
 app.get('/', (req, res) => {
   res.json({ 
