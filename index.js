@@ -677,6 +677,7 @@ const requireRole = (role) => (req, res, next) => {
 
 // ========= SOCKET.IO FOR REAL-TIME =========
 // ========= SOCKET.IO FOR REAL-TIME =========
+// ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
 const activeCalls = new Map();
 const onlineUsers = new Map();
@@ -769,7 +770,47 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ========= CHAT HANDLERS =========
+  socket.on('request_pending_notifications', async () => {
+    try {
+      const userId = socket.userId;
+      if (!userId) {
+        console.log('❌ No userId - cannot fetch pending notifications');
+        return;
+      }
+      
+      const notifications = await PendingNotification.find({
+        userId: userId,
+        read: false
+      }).sort({ createdAt: -1 }).limit(50);
+      
+      console.log(`📬 Found ${notifications.length} pending notifications for user ${userId}`);
+      
+      const formattedNotifications = notifications.map(notif => ({
+        type: notif.type,
+        senderName: notif.senderName,
+        senderId: notif.senderId,
+        senderAvatar: notif.senderAvatar,
+        conversationId: notif.conversationId,
+        content: notif.content,
+        callType: notif.callType,
+        createdAt: notif.createdAt
+      }));
+      
+      socket.emit('pending_notifications', {
+        notifications: formattedNotifications
+      });
+      
+      await PendingNotification.updateMany(
+        { userId: userId, read: false },
+        { $set: { read: true } }
+      );
+      
+      console.log(`✅ Sent ${notifications.length} pending notifications`);
+    } catch (error) {
+      console.error('❌ Error fetching pending notifications:', error);
+    }
+  });
+
   socket.on('join_conversation', async (conversationId) => {
     if (!socket.userId) {
       socket.emit('error', { error: 'Authentication required' });
@@ -777,7 +818,7 @@ io.on('connection', (socket) => {
     }
     socket.join(`conversation_${conversationId}`);
     
-    // Mark undelivered messages as delivered
+    // ✅ MARK UNDELIVERED MESSAGES AS DELIVERED (single tick → double tick)
     try {
       const undeliveredMessages = await Message.find({
         conversationId: conversationId,
@@ -839,7 +880,7 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Blocking check
+      // ========= ADD THIS BLOCKING CHECK HERE =========
       const blocked = await isBlocked(receiverId, socket.userId);
       if (blocked) {
         console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
@@ -847,8 +888,9 @@ io.on('connection', (socket) => {
           tempId, 
           messageId: Date.now().toString()
         });
-        return;
+        return; // Don't deliver message
       }
+      // ========= END OF BLOCKING CHECK =========
 
       if (!conversationId || !receiverId || !content) {
         socket.emit('message_error', { 
@@ -870,6 +912,7 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // ✅ Build message data with ALL fields
       const messageData = {
         conversationId,
         senderId: socket.userId,
@@ -882,10 +925,11 @@ io.on('connection', (socket) => {
         mimeType: mimeType || null,
         duration: duration || null,
         iv,
-        delivered: false,
+        delivered: false,  // ❌ Start as NOT delivered
         read: false
       };
       
+      // Add replyTo if provided
       if (replyTo && replyTo.messageId) {
         messageData.replyTo = {
           messageId: replyTo.messageId,
@@ -917,9 +961,11 @@ io.on('connection', (socket) => {
         id: populatedMessage._id.toString()
       };
 
+      // ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
       const receiverSocketId = connectedUsers.get(receiverId.toString());
 
       if (receiverSocketId) {
+        // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
         await Message.findByIdAndUpdate(message._id, {
           delivered: true,
           deliveredAt: new Date()
@@ -928,16 +974,23 @@ io.on('connection', (socket) => {
         messagePayload.delivered = true;
         messagePayload.deliveredAt = new Date();
         
+        // Emit to conversation room with delivered status
         io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+        
+        // Emit message_delivered event for double tick
         io.to(`conversation_${conversationId}`).emit('message_delivered', {
           messageId: message._id.toString()
         });
         
         console.log(`✅ Message delivered (online): ${message._id}`);
       } else {
+        // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
         messagePayload.delivered = false;
+        
+        // Emit to conversation room (sender will see single tick)
         io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
         
+        // Store pending notification for offline user
         const sender = await User.findById(socket.userId);
         await PendingNotification.create({
           userId: receiverId,
@@ -996,10 +1049,35 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('user_online', async () => {
+    if (socket.userId) {
+      await User.findByIdAndUpdate(socket.userId, {
+        isOnline: true,
+        lastSeen: new Date()
+      });
+      io.emit('user_online', { userId: socket.userId });
+    }
+  });
+
+  socket.on('user_offline', async () => {
+    if (socket.userId) {
+      const lastSeen = new Date();
+      await User.findByIdAndUpdate(socket.userId, {
+        isOnline: false,
+        lastSeen: lastSeen
+      });
+      io.emit('user_offline', { 
+        userId: socket.userId,
+        lastSeen: lastSeen.toISOString()
+      });
+    }
+  });
+
   socket.on('typing', (data) => {
     const { conversationId, receiverId } = data;
     if (!socket.userId) return;
     
+    // ✅ FIX: Emit to conversation room
     io.to(`conversation_${conversationId}`).emit('user_typing', { 
       conversationId, 
       userId: socket.userId 
@@ -1010,13 +1088,14 @@ io.on('connection', (socket) => {
     const { conversationId, receiverId } = data;
     if (!socket.userId) return;
     
+    // ✅ FIX: Emit to conversation room
     io.to(`conversation_${conversationId}`).emit('user_stop_typing', { 
       conversationId, 
       userId: socket.userId 
     });
   });
 
-  // ========= 1-ON-1 CALL HANDLERS =========
+  // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
   socket.on('call-user', async (data) => {
     try {
       const { receiverId, callType, offer } = data;
@@ -1027,6 +1106,7 @@ io.on('connection', (socket) => {
         return;
       }
 
+      // ========= ADD THIS BLOCKING CHECK HERE =========
       const blocked = await isBlocked(receiverId, callerId);
       if (blocked) {
         console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
@@ -1034,20 +1114,24 @@ io.on('connection', (socket) => {
         return;
       }
       
+      // Check authorization (teacher-student link)
       const isAuthorized = await checkCallAuthorization(callerId, receiverId);
       if (!isAuthorized) {
         socket.emit('call-error', { error: 'Not authorized' });
         return;
       }
       
+      // Get caller info
       const caller = await User.findById(callerId).select('name avatar');
       
+      // Find receiver's socket
       const receiverSocketId = onlineUsers.get(receiverId);
       if (!receiverSocketId) {
         socket.emit('call-error', { error: 'User offline' });
         return;
       }
       
+      // Send call notification to receiver
       io.to(receiverSocketId).emit('call-made', {
         callerId: callerId,
         callerName: caller.name,
@@ -1056,6 +1140,7 @@ io.on('connection', (socket) => {
         offer: offer
       });
       
+      // Notify caller that call is ringing
       socket.emit('call-ringing');
       
     } catch (error) {
@@ -1064,6 +1149,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Answer call
   socket.on('answer-call', async (data) => {
     try {
       const { callerId, answer } = data;
@@ -1077,6 +1163,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Reject call
   socket.on('reject-call', async (data) => {
     try {
       const { callerId } = data;
@@ -1090,6 +1177,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // End call
   socket.on('end-call', async (data) => {
     try {
       const { targetUserId } = data;
@@ -1103,6 +1191,7 @@ io.on('connection', (socket) => {
     }
   });
   
+  // ICE candidate exchange
   socket.on('ice-candidate', async (data) => {
     try {
       const { targetUserId, candidate } = data;
@@ -1116,6 +1205,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========= ADD CALL NOTIFICATION HANDLER RIGHT HERE =========
   socket.on('call-not-answered', async (data) => {
     try {
       const { callerId, receiverId, isVideo, conversationId } = data;
@@ -1141,11 +1231,15 @@ io.on('connection', (socket) => {
   });
 
   // ========= GROUP CALL HANDLERS =========
+  
+  // Join group call
   socket.on('join-group-call', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
 
+      // ✅ ADD THESE LINES:
+      // Cancel pending disconnect if user is rejoining
       if (disconnectTimers.has(userId)) {
         clearTimeout(disconnectTimers.get(userId));
         disconnectTimers.delete(userId);
@@ -1154,13 +1248,16 @@ io.on('connection', (socket) => {
 
       console.log(`📞 ${userName} joining ${sessionId}`);
 
+      // Store info on socket
       socket.callSessionId = sessionId;
       socket.callUserId = userId;
       socket.callUserName = userName;
       socket.callRole = role;
 
+      // Join room
       socket.join(sessionId);
 
+      // Update class status if host
       if (role === 'HOST') {
         await GroupClass.findOneAndUpdate(
           { sessionId },
@@ -1168,24 +1265,28 @@ io.on('connection', (socket) => {
         );
       }
 
+      // Get all sockets in this room to send participant list
       const socketsInRoom = await io.in(sessionId).fetchSockets();
       const participants = socketsInRoom
-        .filter(s => s.id !== socket.id && s.callUserId)
+        .filter(s => s.id !== socket.id && s.callUserId) // Exclude self
         .map(s => ({
           userId: s.callUserId,
           name: s.callUserName,
           role: s.callRole,
-          isVideoEnabled: false,
+          isVideoEnabled: false, // Client will update
           isAudioEnabled: false
         }));
 
+      // Check if host is present
       const hostJoined = socketsInRoom.some(s => s.callRole === 'HOST');
 
+      // Send existing participants to new user
       socket.emit('existing-participants', {
         participants,
         hostJoined
       });
 
+      // Notify others about new participant
       socket.to(sessionId).emit('participant-joined', {
         userId,
         name: userName,
@@ -1202,6 +1303,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Leave group call
   socket.on('leave-group-call', async (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1211,8 +1313,10 @@ io.on('connection', (socket) => {
       
       socket.leave(sessionId);
       
+      // Notify others
       socket.to(sessionId).emit('participant-left', { userId });
       
+      // If host left, notify room
       if (wasHost) {
         socket.to(sessionId).emit('host-left', {
           message: 'Host has left the call'
@@ -1227,6 +1331,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // End call (host only)
   socket.on('end-group-call', async (data) => {
     try {
       const { sessionId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1238,11 +1343,13 @@ io.on('connection', (socket) => {
 
       console.log(`🛑 Host ending ${sessionId}`);
 
+      // Update class status
       await GroupClass.findOneAndUpdate(
         { sessionId },
         { status: 'COMPLETED', endedAt: new Date() }
       );
 
+      // Notify all participants
       io.to(sessionId).emit('call-ended-by-host', {
         message: 'Class ended by teacher'
       });
@@ -1254,10 +1361,12 @@ io.on('connection', (socket) => {
     }
   });
 
+  // WebRTC Offer - relay to target
   socket.on('webrtc-offer', async (data) => {
     try {
       const { sessionId, targetUserId, offer } = typeof data === 'string' ? JSON.parse(data) : data;
       
+      // Find target socket in room
       const socketsInRoom = await io.in(sessionId).fetchSockets();
       const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
       
@@ -1272,6 +1381,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // WebRTC Answer - relay to target
   socket.on('webrtc-answer', async (data) => {
     try {
       const { sessionId, targetUserId, answer } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1290,6 +1400,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ICE Candidate - relay to target
   socket.on('webrtc-ice-candidate', async (data) => {
     try {
       const { sessionId, targetUserId, candidate } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1308,6 +1419,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Toggle Audio - broadcast to room
   socket.on('toggle-audio', (data) => {
     try {
       const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1320,6 +1432,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Toggle Video - broadcast to room
   socket.on('toggle-video', (data) => {
     try {
       const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1332,6 +1445,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Start Screen Share - broadcast to room
   socket.on('start-screen-share', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1341,6 +1455,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Stop Screen Share - broadcast to room
   socket.on('stop-screen-share', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1350,6 +1465,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Raise Hand - broadcast to room
   socket.on('raise-hand', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1359,6 +1475,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Lower Hand - broadcast to room
   socket.on('lower-hand', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1368,11 +1485,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Class Chat - broadcast to room
   socket.on('class-chat-message', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, message, timestamp } = payload;
 
+      // Optionally save to DB
       await ClassChatMessage.create({
         sessionId,
         senderId: userId,
@@ -1382,6 +1501,7 @@ io.on('connection', (socket) => {
         isPrivate: false
       });
 
+      // Broadcast to room (including sender for confirmation)
       io.to(sessionId).emit('class-chat-message', {
         userId,
         userName,
@@ -1393,11 +1513,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Whiteboard Draw - broadcast to room
   socket.on('whiteboard-draw', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, strokeData } = payload;
 
+      // Optionally save to DB
       let whiteboard = await WhiteboardData.findOne({ sessionId });
       if (!whiteboard) {
         whiteboard = await WhiteboardData.create({
@@ -1409,6 +1531,7 @@ io.on('connection', (socket) => {
       whiteboard.strokes.push(strokeData);
       await whiteboard.save();
 
+      // Broadcast to others (not sender)
       socket.to(sessionId).emit('whiteboard-draw', {
         userId,
         strokeData
@@ -1418,17 +1541,20 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Whiteboard Clear - broadcast to room
   socket.on('whiteboard-clear', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId } = payload;
 
+      // Clear in DB
       await WhiteboardData.findOneAndUpdate(
         { sessionId },
         { strokes: [], images: [], updatedAt: new Date() },
         { upsert: true }
       );
 
+      // Broadcast to all
       io.to(sessionId).emit('whiteboard-clear', { userId });
     } catch (error) {
       console.error('Whiteboard clear error:', error);
@@ -1439,6 +1565,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
+    // 1-on-1 call cleanup
     if (socket.userId && activeCalls.has(socket.userId)) {
       const otherUserId = activeCalls.get(socket.userId);
       activeCalls.delete(socket.userId);
@@ -1451,6 +1578,7 @@ io.on('connection', (socket) => {
       }
     }
     
+    // User online status cleanup
     if (socket.userId) {
       connectedUsers.delete(socket.userId);
       onlineUsers.delete(socket.userId);
@@ -1460,6 +1588,7 @@ io.on('connection', (socket) => {
         lastSeen: lastSeen
       });
       
+      // ✅ FIX: Only broadcast to conversation partners, not everyone
       try {
         const conversations = await Conversation.find({
           $or: [
@@ -1468,6 +1597,7 @@ io.on('connection', (socket) => {
           ]
         }).lean();
         
+        // Notify each conversation partner individually
         for (const conv of conversations) {
           const partnerId = conv.teacherId.toString() === socket.userId 
             ? conv.studentId.toString() 
@@ -1485,28 +1615,34 @@ io.on('connection', (socket) => {
       }
     }
 
+    // ========= GROUP CALL CLEANUP WITH GRACE PERIOD =========
     if (socket.callSessionId && socket.callUserId) {
       const sessionId = socket.callSessionId;
       const userId = socket.callUserId;
-      const userName = socket.callUserName || userId;
+      const userName = socket.callUserName || userId; // ✅ ADD THIS LINE
       const wasHost = socket.callRole === 'HOST';
       
       console.log(`⏳ ${userName} disconnected from ${sessionId}, waiting 10s for reconnection...`);
       
+      // ✅ Wait 10 seconds before marking as left
       const timerId = setTimeout(() => {
         console.log(`🔴 ${userId} did not reconnect, marking as left`);
         
+        // Notify room
         if (wasHost) {
           io.to(sessionId).emit('host-left', {
-            userId: userId,
+            userId: userId, // ✅ ADD THIS LINE
             message: 'Host has disconnected'
           });
         }
         
         io.to(sessionId).emit('participant-left', { userId });
+        
+        // Clean up timer
         disconnectTimers.delete(userId);
-      }, 10000);
+      }, 10000); // 10 second grace period
       
+      // Store timer so we can cancel it if user reconnects
       disconnectTimers.set(userId, timerId);
     }
   });
@@ -1516,7 +1652,6 @@ io.on('connection', (socket) => {
   });
 
 }); // ← END OF io.on('connection')
-// ========= END OF GROUP CALL HANDLERS =========
 // ========= ROOT & HEALTH ENDPOINTS =========
 app.get('/', (req, res) => {
   res.json({ 
