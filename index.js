@@ -1231,6 +1231,15 @@ socket.on('stop_typing', (data) => {
   // Join group call
 // ========= ENHANCED GROUP CALL HANDLERS (ZOOM-LIKE) =========
 
+  // Store active call sessions - ADD THIS AT THE TOP OF io.on('connection')
+const activeCallSessions = new Map(); // sessionId -> { hostUserId, participants: Map(), hostJoined: boolean }
+let currentUserIdInCall = null;
+let currentSessionIdInCall = null;
+const disconnectTimers = new Map(); // ADD THIS for reconnection handling
+
+io.on('connection', (socket) => {
+  console.log('🔌 New client connected:', socket.id);
+
 // JOIN GROUP CALL
 socket.on('join-group-call', async (data) => {
   try {
