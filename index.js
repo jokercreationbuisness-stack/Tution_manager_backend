@@ -1420,30 +1420,46 @@ io.on('connection', (socket) => {
   });
 
   // Toggle Audio - broadcast to room
-  socket.on('toggle-audio', (data) => {
-    try {
-      const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('media-state-changed', {
-        userId,
-        isAudioEnabled
-      });
-    } catch (error) {
-      console.error('Toggle audio error:', error);
-    }
-  });
+  // Toggle Audio - broadcast to room
+socket.on('toggle-audio', (data) => {
+  try {
+    const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    // ✅ FIX: Broadcast BOTH events
+    socket.to(sessionId).emit('toggle-audio', {
+      userId,
+      isAudioEnabled
+    });
+    
+    socket.to(sessionId).emit('media-state-changed', {
+      userId,
+      isAudioEnabled
+    });
+  } catch (error) {
+    console.error('Toggle audio error:', error);
+  }
+});
 
   // Toggle Video - broadcast to room
-  socket.on('toggle-video', (data) => {
-    try {
-      const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('media-state-changed', {
-        userId,
-        isVideoEnabled
-      });
-    } catch (error) {
-      console.error('Toggle video error:', error);
-    }
-  });
+  // Toggle Video - broadcast to room
+socket.on('toggle-video', (data) => {
+  try {
+    const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    // ✅ FIX: Broadcast BOTH events
+    socket.to(sessionId).emit('toggle-video', {
+      userId,
+      isVideoEnabled
+    });
+    
+    socket.to(sessionId).emit('media-state-changed', {
+      userId,
+      isVideoEnabled
+    });
+  } catch (error) {
+    console.error('Toggle video error:', error);
+  }
+});
 
   // Start Screen Share - broadcast to room
   socket.on('start-screen-share', (data) => {
