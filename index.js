@@ -676,14 +676,21 @@ const requireRole = (role) => (req, res, next) => {
 };
 
 // ========= SOCKET.IO FOR REAL-TIME =========
+// ========= SOCKET.IO FOR REAL-TIME =========
 const connectedUsers = new Map();
-const activeCalls = new Map(); // Track active calls
-const onlineUsers = new Map(); // For WebRTC calls
+const activeCalls = new Map();
+const onlineUsers = new Map();
 const disconnectTimers = new Map();
 
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
+  // Store active call sessions
+  const activeCallSessions = new Map();
+  let currentUserIdInCall = null;
+  let currentSessionIdInCall = null;
+
+  // ========= AUTHENTICATION & BASIC HANDLERS =========
   socket.on('authenticate', async (data) => {
     try {
       if (!data || !data.token) {
@@ -719,7 +726,7 @@ io.on('connection', (socket) => {
       }
       
       connectedUsers.set(socket.userId, socket.id);
-      onlineUsers.set(socket.userId, socket.id); // For WebRTC
+      onlineUsers.set(socket.userId, socket.id);
       socket.join(socket.userId);
       
       await User.findByIdAndUpdate(socket.userId, {
@@ -762,167 +769,123 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('request_pending_notifications', async () => {
+  // ========= CHAT HANDLERS =========
+  socket.on('join_conversation', async (conversationId) => {
+    if (!socket.userId) {
+      socket.emit('error', { error: 'Authentication required' });
+      return;
+    }
+    socket.join(`conversation_${conversationId}`);
+    
+    // Mark undelivered messages as delivered
     try {
-      const userId = socket.userId;
-      if (!userId) {
-        console.log('❌ No userId - cannot fetch pending notifications');
-        return;
-      }
-      
-      const notifications = await PendingNotification.find({
-        userId: userId,
-        read: false
-      }).sort({ createdAt: -1 }).limit(50);
-      
-      console.log(`📬 Found ${notifications.length} pending notifications for user ${userId}`);
-      
-      const formattedNotifications = notifications.map(notif => ({
-        type: notif.type,
-        senderName: notif.senderName,
-        senderId: notif.senderId,
-        senderAvatar: notif.senderAvatar,
-        conversationId: notif.conversationId,
-        content: notif.content,
-        callType: notif.callType,
-        createdAt: notif.createdAt
-      }));
-      
-      socket.emit('pending_notifications', {
-        notifications: formattedNotifications
+      const undeliveredMessages = await Message.find({
+        conversationId: conversationId,
+        receiverId: socket.userId,
+        delivered: false
       });
       
-      await PendingNotification.updateMany(
-        { userId: userId, read: false },
-        { $set: { read: true } }
-      );
-      
-      console.log(`✅ Sent ${notifications.length} pending notifications`);
+      if (undeliveredMessages.length > 0) {
+        await Message.updateMany(
+          {
+            conversationId: conversationId,
+            receiverId: socket.userId,
+            delivered: false
+          },
+          {
+            $set: {
+              delivered: true,
+              deliveredAt: new Date()
+            }
+          }
+        );
+        
+        undeliveredMessages.forEach(msg => {
+          io.to(`conversation_${conversationId}`).emit('message_delivered', {
+            messageId: msg._id.toString()
+          });
+        });
+        
+        console.log(`✅ Marked ${undeliveredMessages.length} messages as delivered`);
+      }
     } catch (error) {
-      console.error('❌ Error fetching pending notifications:', error);
+      console.error('Error marking messages as delivered:', error);
     }
   });
-
-  socket.on('join_conversation', async (conversationId) => {
-  if (!socket.userId) {
-    socket.emit('error', { error: 'Authentication required' });
-    return;
-  }
-  socket.join(`conversation_${conversationId}`);
-  
-  // ✅ MARK UNDELIVERED MESSAGES AS DELIVERED (single tick → double tick)
-  try {
-    const undeliveredMessages = await Message.find({
-      conversationId: conversationId,
-      receiverId: socket.userId,
-      delivered: false
-    });
-    
-    if (undeliveredMessages.length > 0) {
-      await Message.updateMany(
-        {
-          conversationId: conversationId,
-          receiverId: socket.userId,
-          delivered: false
-        },
-        {
-          $set: {
-            delivered: true,
-            deliveredAt: new Date()
-          }
-        }
-      );
-      
-      undeliveredMessages.forEach(msg => {
-        io.to(`conversation_${conversationId}`).emit('message_delivered', {
-          messageId: msg._id.toString()
-        });
-      });
-      
-      console.log(`✅ Marked ${undeliveredMessages.length} messages as delivered`);
-    }
-  } catch (error) {
-    console.error('Error marking messages as delivered:', error);
-  }
-});
 
   socket.on('leave_conversation', (conversationId) => {
     socket.leave(`conversation_${conversationId}`);
   });
 
   socket.on('send_message', async (data) => {
-  try {
-    const { 
-      conversationId, 
-      receiverId, 
-      content, 
-      type, 
-      iv, 
-      tempId, 
-      replyTo,
-      fileUrl,
-      fileName,
-      fileSize,
-      mimeType,
-      duration
-    } = data;
-    
-    if (!socket.userId) {
-      socket.emit('message_error', { error: 'Not authenticated', tempId });
-      return;
-    }
-
-    // ========= ADD THIS BLOCKING CHECK HERE =========
-    const blocked = await isBlocked(receiverId, socket.userId);
-    if (blocked) {
-      console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
-      socket.emit('message_sent', { 
+    try {
+      const { 
+        conversationId, 
+        receiverId, 
+        content, 
+        type, 
+        iv, 
         tempId, 
-        messageId: Date.now().toString()
-      });
-      return; // Don't deliver message
-    }
-    // ========= END OF BLOCKING CHECK =========
-
-    if (!conversationId || !receiverId || !content) {
-      socket.emit('message_error', { 
-        error: 'Missing required fields',
-        tempId 
-      });
-      return;
-    }
-
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) {
-      socket.emit('message_error', { error: 'Conversation not found', tempId });
-      return;
-    }
-
-    if (conversation.teacherId.toString() !== socket.userId && 
-        conversation.studentId.toString() !== socket.userId) {
-      socket.emit('message_error', { error: 'Not authorized', tempId });
-      return;
-    }
-
-    // ✅ Build message data with ALL fields
-    // ✅ FIX: Build message data with delivered: true by default
-const messageData = {
-  conversationId,
-  senderId: socket.userId,
-  receiverId,
-  content,
-  type: type || 'TEXT',
-  fileUrl: fileUrl || null,
-  fileName: fileName || null,
-  fileSize: fileSize || null,
-  mimeType: mimeType || null,
-  duration: duration || null,
-  iv,
-  delivered: false,  // ❌ Start as NOT delivered
-  read: false
-};
+        replyTo,
+        fileUrl,
+        fileName,
+        fileSize,
+        mimeType,
+        duration
+      } = data;
       
-      // Add replyTo if provided
+      if (!socket.userId) {
+        socket.emit('message_error', { error: 'Not authenticated', tempId });
+        return;
+      }
+
+      // Blocking check
+      const blocked = await isBlocked(receiverId, socket.userId);
+      if (blocked) {
+        console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
+        socket.emit('message_sent', { 
+          tempId, 
+          messageId: Date.now().toString()
+        });
+        return;
+      }
+
+      if (!conversationId || !receiverId || !content) {
+        socket.emit('message_error', { 
+          error: 'Missing required fields',
+          tempId 
+        });
+        return;
+      }
+
+      const conversation = await Conversation.findById(conversationId);
+      if (!conversation) {
+        socket.emit('message_error', { error: 'Conversation not found', tempId });
+        return;
+      }
+
+      if (conversation.teacherId.toString() !== socket.userId && 
+          conversation.studentId.toString() !== socket.userId) {
+        socket.emit('message_error', { error: 'Not authorized', tempId });
+        return;
+      }
+
+      const messageData = {
+        conversationId,
+        senderId: socket.userId,
+        receiverId,
+        content,
+        type: type || 'TEXT',
+        fileUrl: fileUrl || null,
+        fileName: fileName || null,
+        fileSize: fileSize || null,
+        mimeType: mimeType || null,
+        duration: duration || null,
+        iv,
+        delivered: false,
+        read: false
+      };
+      
       if (replyTo && replyTo.messageId) {
         messageData.replyTo = {
           messageId: replyTo.messageId,
@@ -954,56 +917,44 @@ const messageData = {
         id: populatedMessage._id.toString()
       };
 
-      // ✅ Emit new_message to conversation room with delivered status
-// ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
-const receiverSocketId = connectedUsers.get(receiverId.toString());
+      const receiverSocketId = connectedUsers.get(receiverId.toString());
 
-if (receiverSocketId) {
-  // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
-  await Message.findByIdAndUpdate(message._id, {
-    delivered: true,
-    deliveredAt: new Date()
-  });
-  
-  messagePayload.delivered = true;
-  messagePayload.deliveredAt = new Date();
-  
-  // Emit to conversation room with delivered status
-  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-  
-  // Emit message_delivered event for double tick
-  io.to(`conversation_${conversationId}`).emit('message_delivered', {
-    messageId: message._id.toString()
-  });
-  
-  console.log(`✅ Message delivered (online): ${message._id}`);
-} else {
-  // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
-  messagePayload.delivered = false;
-  
-  // Emit to conversation room (sender will see single tick)
-  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-  
-  // Store pending notification for offline user
-  // User is OFFLINE - store notification for when they come back online
-  const sender = await User.findById(socket.userId);
-  await PendingNotification.create({
-    userId: receiverId,
-    type: 'message',
-    senderName: sender.name,
-    senderId: socket.userId,
-    senderAvatar: sender.avatar,
-    conversationId: conversationId,
-    content: content
-  });
-  console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
-}
+      if (receiverSocketId) {
+        await Message.findByIdAndUpdate(message._id, {
+          delivered: true,
+          deliveredAt: new Date()
+        });
+        
+        messagePayload.delivered = true;
+        messagePayload.deliveredAt = new Date();
+        
+        io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+        io.to(`conversation_${conversationId}`).emit('message_delivered', {
+          messageId: message._id.toString()
+        });
+        
+        console.log(`✅ Message delivered (online): ${message._id}`);
+      } else {
+        messagePayload.delivered = false;
+        io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+        
+        const sender = await User.findById(socket.userId);
+        await PendingNotification.create({
+          userId: receiverId,
+          type: 'message',
+          senderName: sender.name,
+          senderId: socket.userId,
+          senderAvatar: sender.avatar,
+          conversationId: conversationId,
+          content: content
+        });
+        console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
+      }
 
-socket.emit('message_sent', { 
-  tempId, 
-  messageId: message._id.toString() 
-});
-
+      socket.emit('message_sent', { 
+        tempId, 
+        messageId: message._id.toString() 
+      });
 
     } catch (error) {
       console.error('❌ Send message error:', error);
@@ -1045,53 +996,27 @@ socket.emit('message_sent', {
     }
   });
 
-  socket.on('user_online', async () => {
-    if (socket.userId) {
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: true,
-        lastSeen: new Date()
-      });
-      io.emit('user_online', { userId: socket.userId });
-    }
-  });
-
-  socket.on('user_offline', async () => {
-    if (socket.userId) {
-      const lastSeen = new Date();
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: false,
-        lastSeen: lastSeen
-      });
-      io.emit('user_offline', { 
-        userId: socket.userId,
-        lastSeen: lastSeen.toISOString()
-      });
-    }
-  });
-
   socket.on('typing', (data) => {
-  const { conversationId, receiverId } = data;
-  if (!socket.userId) return;
-  
-  // ✅ FIX: Emit to conversation room
-  io.to(`conversation_${conversationId}`).emit('user_typing', { 
-    conversationId, 
-    userId: socket.userId 
+    const { conversationId, receiverId } = data;
+    if (!socket.userId) return;
+    
+    io.to(`conversation_${conversationId}`).emit('user_typing', { 
+      conversationId, 
+      userId: socket.userId 
+    });
   });
-});
 
-socket.on('stop_typing', (data) => {
-  const { conversationId, receiverId } = data;
-  if (!socket.userId) return;
-  
-  // ✅ FIX: Emit to conversation room
-  io.to(`conversation_${conversationId}`).emit('user_stop_typing', { 
-    conversationId, 
-    userId: socket.userId 
+  socket.on('stop_typing', (data) => {
+    const { conversationId, receiverId } = data;
+    if (!socket.userId) return;
+    
+    io.to(`conversation_${conversationId}`).emit('user_stop_typing', { 
+      conversationId, 
+      userId: socket.userId 
+    });
   });
-});
 
-  // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
+  // ========= 1-ON-1 CALL HANDLERS =========
   socket.on('call-user', async (data) => {
     try {
       const { receiverId, callType, offer } = data;
@@ -1102,32 +1027,27 @@ socket.on('stop_typing', (data) => {
         return;
       }
 
-      // ========= ADD THIS BLOCKING CHECK HERE =========
-    const blocked = await isBlocked(receiverId, callerId);
-    if (blocked) {
-      console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
-      socket.emit('call-error', { error: 'User is unavailable' });
-      return;
-    }
+      const blocked = await isBlocked(receiverId, callerId);
+      if (blocked) {
+        console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
+        socket.emit('call-error', { error: 'User is unavailable' });
+        return;
+      }
       
-      // Check authorization (teacher-student link)
       const isAuthorized = await checkCallAuthorization(callerId, receiverId);
       if (!isAuthorized) {
         socket.emit('call-error', { error: 'Not authorized' });
         return;
       }
       
-      // Get caller info
       const caller = await User.findById(callerId).select('name avatar');
       
-      // Find receiver's socket
       const receiverSocketId = onlineUsers.get(receiverId);
       if (!receiverSocketId) {
         socket.emit('call-error', { error: 'User offline' });
         return;
       }
       
-      // Send call notification to receiver
       io.to(receiverSocketId).emit('call-made', {
         callerId: callerId,
         callerName: caller.name,
@@ -1136,7 +1056,6 @@ socket.on('stop_typing', (data) => {
         offer: offer
       });
       
-      // Notify caller that call is ringing
       socket.emit('call-ringing');
       
     } catch (error) {
@@ -1145,7 +1064,6 @@ socket.on('stop_typing', (data) => {
     }
   });
   
-  // Answer call
   socket.on('answer-call', async (data) => {
     try {
       const { callerId, answer } = data;
@@ -1159,7 +1077,6 @@ socket.on('stop_typing', (data) => {
     }
   });
   
-  // Reject call
   socket.on('reject-call', async (data) => {
     try {
       const { callerId } = data;
@@ -1173,7 +1090,6 @@ socket.on('stop_typing', (data) => {
     }
   });
   
-  // End call
   socket.on('end-call', async (data) => {
     try {
       const { targetUserId } = data;
@@ -1187,7 +1103,6 @@ socket.on('stop_typing', (data) => {
     }
   });
   
-  // ICE candidate exchange
   socket.on('ice-candidate', async (data) => {
     try {
       const { targetUserId, candidate } = data;
@@ -1201,8 +1116,7 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // ========= ADD CALL NOTIFICATION HANDLER RIGHT HERE =========
-    socket.on('call-not-answered', async (data) => {
+  socket.on('call-not-answered', async (data) => {
     try {
       const { callerId, receiverId, isVideo, conversationId } = data;
       const receiverSocketId = onlineUsers.get(receiverId);
@@ -1226,27 +1140,12 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // ========= 🆕 GROUP CALL HANDLERS =========
-  
-  io.on('connection', (socket) => {
-  console.log(`🔗 User connected: ${socket.id}`);
-
-  // Store active call sessions
-  const activeCallSessions = new Map();
-  const disconnectTimers = new Map();
-
-  let currentUserIdInCall = null;
-  let currentSessionIdInCall = null;
-
-  // ========= GROUP CALL SIGNALING =========
-
-  // Join group call
+  // ========= GROUP CALL HANDLERS =========
   socket.on('join-group-call', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
 
-      // Cancel pending disconnect if user is rejoining
       if (disconnectTimers.has(userId)) {
         clearTimeout(disconnectTimers.get(userId));
         disconnectTimers.delete(userId);
@@ -1255,16 +1154,13 @@ socket.on('stop_typing', (data) => {
 
       console.log(`📞 ${userName} joining ${sessionId}`);
 
-      // Store info on socket
       socket.callSessionId = sessionId;
       socket.callUserId = userId;
       socket.callUserName = userName;
       socket.callRole = role;
 
-      // Join room
       socket.join(sessionId);
 
-      // Update class status if host
       if (role === 'HOST') {
         await GroupClass.findOneAndUpdate(
           { sessionId },
@@ -1272,7 +1168,6 @@ socket.on('stop_typing', (data) => {
         );
       }
 
-      // Get all sockets in this room to send participant list
       const socketsInRoom = await io.in(sessionId).fetchSockets();
       const participants = socketsInRoom
         .filter(s => s.id !== socket.id && s.callUserId)
@@ -1284,16 +1179,13 @@ socket.on('stop_typing', (data) => {
           isAudioEnabled: false
         }));
 
-      // Check if host is present
       const hostJoined = socketsInRoom.some(s => s.callRole === 'HOST');
 
-      // Send existing participants to new user
       socket.emit('existing-participants', {
         participants,
         hostJoined
       });
 
-      // Notify others about new participant
       socket.to(sessionId).emit('participant-joined', {
         userId,
         name: userName,
@@ -1310,7 +1202,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Leave group call
   socket.on('leave-group-call', async (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1320,10 +1211,8 @@ socket.on('stop_typing', (data) => {
       
       socket.leave(sessionId);
       
-      // Notify others
       socket.to(sessionId).emit('participant-left', { userId });
       
-      // If host left, notify room
       if (wasHost) {
         socket.to(sessionId).emit('host-left', {
           message: 'Host has left the call'
@@ -1338,7 +1227,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // End call (host only)
   socket.on('end-group-call', async (data) => {
     try {
       const { sessionId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1350,13 +1238,11 @@ socket.on('stop_typing', (data) => {
 
       console.log(`🛑 Host ending ${sessionId}`);
 
-      // Update class status
       await GroupClass.findOneAndUpdate(
         { sessionId },
         { status: 'COMPLETED', endedAt: new Date() }
       );
 
-      // Notify all participants
       io.to(sessionId).emit('call-ended-by-host', {
         message: 'Class ended by teacher'
       });
@@ -1368,12 +1254,10 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // WebRTC Offer - relay to target
   socket.on('webrtc-offer', async (data) => {
     try {
       const { sessionId, targetUserId, offer } = typeof data === 'string' ? JSON.parse(data) : data;
       
-      // Find target socket in room
       const socketsInRoom = await io.in(sessionId).fetchSockets();
       const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
       
@@ -1388,7 +1272,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // WebRTC Answer - relay to target
   socket.on('webrtc-answer', async (data) => {
     try {
       const { sessionId, targetUserId, answer } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1407,7 +1290,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // ICE Candidate - relay to target
   socket.on('webrtc-ice-candidate', async (data) => {
     try {
       const { sessionId, targetUserId, candidate } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1426,7 +1308,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Toggle Audio - broadcast to room
   socket.on('toggle-audio', (data) => {
     try {
       const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1439,7 +1320,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Toggle Video - broadcast to room
   socket.on('toggle-video', (data) => {
     try {
       const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1452,7 +1332,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Start Screen Share - broadcast to room
   socket.on('start-screen-share', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1462,7 +1341,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Stop Screen Share - broadcast to room
   socket.on('stop-screen-share', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1472,7 +1350,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Raise Hand - broadcast to room
   socket.on('raise-hand', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1482,7 +1359,6 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Lower Hand - broadcast to room
   socket.on('lower-hand', (data) => {
     try {
       const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
@@ -1492,13 +1368,11 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Class Chat - broadcast to room
   socket.on('class-chat-message', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, userName, message, timestamp } = payload;
 
-      // Optionally save to DB
       await ClassChatMessage.create({
         sessionId,
         senderId: userId,
@@ -1508,7 +1382,6 @@ socket.on('stop_typing', (data) => {
         isPrivate: false
       });
 
-      // Broadcast to room (including sender for confirmation)
       io.to(sessionId).emit('class-chat-message', {
         userId,
         userName,
@@ -1520,13 +1393,11 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Whiteboard Draw - broadcast to room
   socket.on('whiteboard-draw', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId, strokeData } = payload;
 
-      // Optionally save to DB
       let whiteboard = await WhiteboardData.findOne({ sessionId });
       if (!whiteboard) {
         whiteboard = await WhiteboardData.create({
@@ -1538,7 +1409,6 @@ socket.on('stop_typing', (data) => {
       whiteboard.strokes.push(strokeData);
       await whiteboard.save();
 
-      // Broadcast to others (not sender)
       socket.to(sessionId).emit('whiteboard-draw', {
         userId,
         strokeData
@@ -1548,20 +1418,17 @@ socket.on('stop_typing', (data) => {
     }
   });
 
-  // Whiteboard Clear - broadcast to room
   socket.on('whiteboard-clear', async (data) => {
     try {
       const payload = typeof data === 'string' ? JSON.parse(data) : data;
       const { sessionId, userId } = payload;
 
-      // Clear in DB
       await WhiteboardData.findOneAndUpdate(
         { sessionId },
         { strokes: [], images: [], updatedAt: new Date() },
         { upsert: true }
       );
 
-      // Broadcast to all
       io.to(sessionId).emit('whiteboard-clear', { userId });
     } catch (error) {
       console.error('Whiteboard clear error:', error);
@@ -1572,7 +1439,6 @@ socket.on('stop_typing', (data) => {
   socket.on('disconnect', async (reason) => {
     console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
     
-    // 1-on-1 call cleanup
     if (socket.userId && activeCalls.has(socket.userId)) {
       const otherUserId = activeCalls.get(socket.userId);
       activeCalls.delete(socket.userId);
@@ -1585,7 +1451,6 @@ socket.on('stop_typing', (data) => {
       }
     }
     
-    // User online status cleanup
     if (socket.userId) {
       connectedUsers.delete(socket.userId);
       onlineUsers.delete(socket.userId);
@@ -1595,7 +1460,6 @@ socket.on('stop_typing', (data) => {
         lastSeen: lastSeen
       });
       
-      // Broadcast to conversation partners
       try {
         const conversations = await Conversation.find({
           $or: [
@@ -1621,7 +1485,6 @@ socket.on('stop_typing', (data) => {
       }
     }
 
-    // Group call cleanup with grace period
     if (socket.callSessionId && socket.callUserId) {
       const sessionId = socket.callSessionId;
       const userId = socket.callUserId;
@@ -1652,7 +1515,7 @@ socket.on('stop_typing', (data) => {
     console.error('❌ Socket error:', error);
   });
 
-}); // ← THIS IS THE CRITICAL CLOSING BRACKET FOR io.on('connection')
+}); // ← END OF io.on('connection')
 // ========= END OF GROUP CALL HANDLERS =========
 // ========= ROOT & HEALTH ENDPOINTS =========
 app.get('/', (req, res) => {
