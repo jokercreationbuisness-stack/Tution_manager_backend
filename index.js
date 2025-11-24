@@ -1230,24 +1230,15 @@ socket.on('stop_typing', (data) => {
   
   // ========= ENHANCED GROUP CALL HANDLERS (ZOOM-LIKE) =========
   
-  // Store active call sessions - ADD THIS AT THE TOP OF io.on('connection')
-  // (If you already have it, skip this line)
-  const activeCallSessions = new Map(); // sessionId -> { hostUserId, participants: Map(), hostJoined: boolean }
-  
-  let currentUserIdInCall = null;
-  let currentSessionIdInCall = null;
+  // ========= ENHANCED GROUP CALL HANDLERS (ZOOM-LIKE) =========
 
-  // JOIN GROUP CALL
-    // JOIN GROUP CALL (with deduplication)
-    // ========= GROUP CALL SIGNALING (FULL FEATURED, MINIMAL BACKEND) =========
-  
-  // Join group call
-  socket.on('join-group-call', async (data) => {
-    try {
-      const payload = typeof data === 'string' ? JSON.parse(data) : data;
-      const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
+// Join group call
+socket.on('join-group-call', async (data) => {
+  try {
+    const payload = typeof data === 'string' ? JSON.parse(data) : data;
+    const { sessionId, userId, userName, role, isVideoEnabled, isAudioEnabled } = payload;
 
-      // ✅ ADD THESE LINES:
+    // ✅ ADD THESE LINES:
     // Cancel pending disconnect if user is rejoining
     if (disconnectTimers.has(userId)) {
       clearTimeout(disconnectTimers.get(userId));
@@ -1256,851 +1247,410 @@ socket.on('stop_typing', (data) => {
     }
 
     console.log(`📞 ${userName} joining ${sessionId}`);
-    // ... rest of existing code continues
 
-      console.log(`📞 ${userName} joining ${sessionId}`);
+    // Store info on socket
+    socket.callSessionId = sessionId;
+    socket.callUserId = userId;
+    socket.callUserName = userName;
+    socket.callRole = role;
 
-      // Store info on socket
-      socket.callSessionId = sessionId;
-      socket.callUserId = userId;
-      socket.callUserName = userName;
-      socket.callRole = role;
+    // Join room
+    socket.join(sessionId);
 
-      // Join room
-      socket.join(sessionId);
-
-      // Update class status if host
-      if (role === 'HOST') {
-        await GroupClass.findOneAndUpdate(
-          { sessionId },
-          { status: 'LIVE', startedAt: new Date() }
-        );
-      }
-
-      // Get all sockets in this room to send participant list
-      const socketsInRoom = await io.in(sessionId).fetchSockets();
-      const participants = socketsInRoom
-        .filter(s => s.id !== socket.id && s.callUserId) // Exclude self
-        .map(s => ({
-          userId: s.callUserId,
-          name: s.callUserName,
-          role: s.callRole,
-          isVideoEnabled: false, // Client will update
-          isAudioEnabled: false
-        }));
-
-      // Check if host is present
-      const hostJoined = socketsInRoom.some(s => s.callRole === 'HOST');
-
-      // Send existing participants to new user
-      socket.emit('existing-participants', {
-        participants,
-        hostJoined
-      });
-
-      // Notify others about new participant
-      socket.to(sessionId).emit('participant-joined', {
-        userId,
-        name: userName,
-        role,
-        isVideoEnabled: isVideoEnabled || false,
-        isAudioEnabled: isAudioEnabled || false
-      });
-
-      console.log(`✅ ${userName} joined, sent ${participants.length} existing participants`);
-
-    } catch (error) {
-      console.error('Join error:', error);
-      socket.emit('group-call-error', { message: error.message });
-    }
-  });
-
-  // Leave group call
-  socket.on('leave-group-call', async (data) => {
-    try {
-      const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
-      const wasHost = socket.callRole === 'HOST';
-      
-      console.log(`👋 ${userId} leaving ${sessionId}`);
-      
-      socket.leave(sessionId);
-      
-      // Notify others
-      socket.to(sessionId).emit('participant-left', { userId });
-      
-      // If host left, notify room
-      if (wasHost) {
-        socket.to(sessionId).emit('host-left', {
-          message: 'Host has left the call'
-        });
-      }
-      
-      socket.callSessionId = null;
-      socket.callUserId = null;
-
-    } catch (error) {
-      console.error('Leave error:', error);
-    }
-  });
-
-  // End call (host only)
-  socket.on('end-group-call', async (data) => {
-    try {
-      const { sessionId } = typeof data === 'string' ? JSON.parse(data) : data;
-
-      if (socket.callRole !== 'HOST') {
-        socket.emit('group-call-error', { message: 'Only host can end call' });
-        return;
-      }
-
-      console.log(`🛑 Host ending ${sessionId}`);
-
-      // Update class status
+    // Update class status if host
+    if (role === 'HOST') {
       await GroupClass.findOneAndUpdate(
         { sessionId },
-        { status: 'COMPLETED', endedAt: new Date() }
+        { status: 'LIVE', startedAt: new Date() }
       );
-
-      // Notify all participants
-      io.to(sessionId).emit('call-ended-by-host', {
-        message: 'Class ended by teacher'
-      });
-
-      console.log(`✅ Call ${sessionId} ended by host`);
-
-    } catch (error) {
-      console.error('End call error:', error);
-    }
-  });
-
-  // WebRTC Offer - relay to target
-  socket.on('webrtc-offer', async (data) => {
-    try {
-      const { sessionId, targetUserId, offer } = typeof data === 'string' ? JSON.parse(data) : data;
-      
-      // Find target socket in room
-      const socketsInRoom = await io.in(sessionId).fetchSockets();
-      const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
-      
-      if (targetSocket) {
-        targetSocket.emit('webrtc-offer', {
-          fromUserId: socket.callUserId,
-          offer
-        });
-      }
-    } catch (error) {
-      console.error('Offer error:', error);
-    }
-  });
-
-  // WebRTC Answer - relay to target
-  socket.on('webrtc-answer', async (data) => {
-    try {
-      const { sessionId, targetUserId, answer } = typeof data === 'string' ? JSON.parse(data) : data;
-      
-      const socketsInRoom = await io.in(sessionId).fetchSockets();
-      const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
-      
-      if (targetSocket) {
-        targetSocket.emit('webrtc-answer', {
-          fromUserId: socket.callUserId,
-          answer
-        });
-      }
-    } catch (error) {
-      console.error('Answer error:', error);
-    }
-  });
-
-  // ICE Candidate - relay to target
-  socket.on('webrtc-ice-candidate', async (data) => {
-    try {
-      const { sessionId, targetUserId, candidate } = typeof data === 'string' ? JSON.parse(data) : data;
-      
-      const socketsInRoom = await io.in(sessionId).fetchSockets();
-      const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
-      
-      if (targetSocket) {
-        targetSocket.emit('webrtc-ice-candidate', {
-          fromUserId: socket.callUserId,
-          candidate
-        });
-      }
-    } catch (error) {
-      console.error('ICE error:', error);
-    }
-  });
-
-  // Toggle Audio - broadcast to room
-  socket.on('toggle-audio', (data) => {
-    try {
-      const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('media-state-changed', {
-        userId,
-        isAudioEnabled
-      });
-    } catch (error) {
-      console.error('Toggle audio error:', error);
-    }
-  });
-
-  // Toggle Video - broadcast to room
-  socket.on('toggle-video', (data) => {
-    try {
-      const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('media-state-changed', {
-        userId,
-        isVideoEnabled
-      });
-    } catch (error) {
-      console.error('Toggle video error:', error);
-    }
-  });
-
-  // Start Screen Share - broadcast to room
-  socket.on('start-screen-share', (data) => {
-    try {
-      const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('screen-share-started', { userId });
-    } catch (error) {
-      console.error('Screen share error:', error);
-    }
-  });
-
-  // Stop Screen Share - broadcast to room
-  socket.on('stop-screen-share', (data) => {
-    try {
-      const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('screen-share-stopped', { userId });
-    } catch (error) {
-      console.error('Stop screen share error:', error);
-    }
-  });
-
-  // Raise Hand - broadcast to room
-  socket.on('raise-hand', (data) => {
-    try {
-      const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('hand-raised', { userId });
-    } catch (error) {
-      console.error('Raise hand error:', error);
-    }
-  });
-
-  // Lower Hand - broadcast to room
-  socket.on('lower-hand', (data) => {
-    try {
-      const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
-      socket.to(sessionId).emit('hand-lowered', { userId });
-    } catch (error) {
-      console.error('Lower hand error:', error);
-    }
-  });
-
-  // Class Chat - broadcast to room
-  socket.on('class-chat-message', async (data) => {
-    try {
-      const payload = typeof data === 'string' ? JSON.parse(data) : data;
-      const { sessionId, userId, userName, message, timestamp } = payload;
-
-      // Optionally save to DB
-      await ClassChatMessage.create({
-        sessionId,
-        senderId: userId,
-        senderName: userName,
-        message,
-        type: 'TEXT',
-        isPrivate: false
-      });
-
-      // Broadcast to room (including sender for confirmation)
-      io.to(sessionId).emit('class-chat-message', {
-        userId,
-        userName,
-        message,
-        timestamp: timestamp || Date.now()
-      });
-    } catch (error) {
-      console.error('Chat error:', error);
-    }
-  });
-
-  // Whiteboard Draw - broadcast to room
-  socket.on('whiteboard-draw', async (data) => {
-    try {
-      const payload = typeof data === 'string' ? JSON.parse(data) : data;
-      const { sessionId, userId, strokeData } = payload;
-
-      // Optionally save to DB
-      let whiteboard = await WhiteboardData.findOne({ sessionId });
-      if (!whiteboard) {
-        whiteboard = await WhiteboardData.create({
-          sessionId,
-          strokes: [],
-          images: []
-        });
-      }
-      whiteboard.strokes.push(strokeData);
-      await whiteboard.save();
-
-      // Broadcast to others (not sender)
-      socket.to(sessionId).emit('whiteboard-draw', {
-        userId,
-        strokeData
-      });
-    } catch (error) {
-      console.error('Whiteboard draw error:', error);
-    }
-  });
-
-  // Whiteboard Clear - broadcast to room
-  socket.on('whiteboard-clear', async (data) => {
-    try {
-      const payload = typeof data === 'string' ? JSON.parse(data) : data;
-      const { sessionId, userId } = payload;
-
-      // Clear in DB
-      await WhiteboardData.findOneAndUpdate(
-        { sessionId },
-        { strokes: [], images: [], updatedAt: new Date() },
-        { upsert: true }
-      );
-
-      // Broadcast to all
-      io.to(sessionId).emit('whiteboard-clear', { userId });
-    } catch (error) {
-      console.error('Whiteboard clear error:', error);
-    }
-  });
-
-  // ========= END OF GROUP CALL HANDLERS =========
-
-  // ========= END OF GROUP CALL HANDLERS =========
-
-  // ========= GROUP CLASS SOCKET HANDLERS =========
-  
-  socket.on('join-group-class', async (data) => {
-    try {
-      const { sessionId } = data;
-      if (!socket.userId) {
-        socket.emit('error', { error: 'Not authenticated' });
-        return;
-      }
-      socket.join(sessionId);
-      const participant = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId }).populate('userId', 'name avatar role');
-      if (!participant) {
-        socket.emit('error', { error: 'Not authorized for this class' });
-        return;
-      }
-      participant.socketId = socket.id;
-      participant.connectionState = 'CONNECTED';
-      await participant.save();
-      socket.to(sessionId).emit('participant-joined', {
-        userId: socket.userId,
-        name: participant.userId.name,
-        avatar: participant.userId.avatar,
-        role: participant.role
-      });
-      const allParticipants = await GroupCallParticipant.find({ sessionId, connectionState: 'CONNECTED' }).populate('userId', 'name avatar role');
-      socket.emit('current-participants', {
-        participants: allParticipants.map(p => ({
-          userId: p.userId._id.toString(),
-          name: p.userId.name,
-          avatar: p.userId.avatar,
-          role: p.role,
-          isVideoEnabled: p.isVideoEnabled,
-          isAudioEnabled: p.isAudioEnabled,
-          isScreenSharing: p.isScreenSharing,
-          isHandRaised: p.isHandRaised
-        }))
-      });
-    } catch (error) {
-      console.error('Join group class error:', error);
-      socket.emit('error', { error: 'Failed to join class' });
-    }
-  });
-  
-  socket.on('leave-group-class', async (data) => {
-    try {
-      const { sessionId } = data;
-      socket.leave(sessionId);
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { leftAt: new Date(), connectionState: 'DISCONNECTED' });
-      socket.to(sessionId).emit('participant-left', { userId: socket.userId });
-    } catch (error) {
-      console.error('Leave group class error:', error);
-    }
-  });
-  
-  socket.on('group-offer', async (data) => {
-    try {
-      const { targetUserId, offer } = data;
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('group-offer', { fromUserId: socket.userId, offer });
-      }
-    } catch (error) {
-      console.error('Group offer error:', error);
-    }
-  });
-  
-  socket.on('group-answer', async (data) => {
-    try {
-      const { targetUserId, answer } = data;
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('group-answer', { fromUserId: socket.userId, answer });
-      }
-    } catch (error) {
-      console.error('Group answer error:', error);
-    }
-  });
-  
-  socket.on('group-ice-candidate', async (data) => {
-    try {
-      const { targetUserId, candidate } = data;
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('group-ice-candidate', { fromUserId: socket.userId, candidate });
-      }
-    } catch (error) {
-      console.error('Group ICE candidate error:', error);
-    }
-  });
-  
-  socket.on('toggle-video', async (data) => {
-    try {
-      const { sessionId, enabled } = data;
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isVideoEnabled: enabled });
-      socket.to(sessionId).emit('participant-video-toggle', { userId: socket.userId, enabled });
-    } catch (error) {
-      console.error('Toggle video error:', error);
-    }
-  });
-  
-  socket.on('toggle-audio', async (data) => {
-    try {
-      const { sessionId, enabled } = data;
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isAudioEnabled: enabled });
-      socket.to(sessionId).emit('participant-audio-toggle', { userId: socket.userId, enabled });
-    } catch (error) {
-      console.error('Toggle audio error:', error);
-    }
-  });
-  
-  socket.on('toggle-screen-share', async (data) => {
-    try {
-      const { sessionId, enabled } = data;
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isScreenSharing: enabled });
-      socket.to(sessionId).emit('participant-screen-share-toggle', { userId: socket.userId, enabled });
-    } catch (error) {
-      console.error('Toggle screen share error:', error);
-    }
-  });
-  
-  socket.on('raise-hand', async (data) => {
-    try {
-      const { sessionId, raised } = data;
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: socket.userId }, { isHandRaised: raised });
-      socket.to(sessionId).emit('participant-hand-raised', { userId: socket.userId, raised });
-    } catch (error) {
-      console.error('Raise hand error:', error);
-    }
-  });
-  
-  socket.on('host-mute-participant', async (data) => {
-    try {
-      const { sessionId, targetUserId, muted } = data;
-      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
-      if (!host) {
-        socket.emit('error', { error: 'Not authorized' });
-        return;
-      }
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { isAudioMutedByHost: muted, isAudioEnabled: !muted });
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('host-muted-you', { muted });
-      }
-      io.to(sessionId).emit('participant-audio-toggle', { userId: targetUserId, enabled: !muted });
-    } catch (error) {
-      console.error('Host mute error:', error);
-    }
-  });
-  
-  socket.on('host-disable-video-participant', async (data) => {
-    try {
-      const { sessionId, targetUserId, disabled } = data;
-      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
-      if (!host) {
-        socket.emit('error', { error: 'Not authorized' });
-        return;
-      }
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { isVideoMutedByHost: disabled, isVideoEnabled: !disabled });
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('host-disabled-your-video', { disabled });
-      }
-      io.to(sessionId).emit('participant-video-toggle', { userId: targetUserId, enabled: !disabled });
-    } catch (error) {
-      console.error('Host disable video error:', error);
-    }
-  });
-  
-  socket.on('host-remove-participant', async (data) => {
-    try {
-      const { sessionId, targetUserId } = data;
-      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
-      if (!host) {
-        socket.emit('error', { error: 'Not authorized' });
-        return;
-      }
-      await GroupCallParticipant.findOneAndUpdate({ sessionId, userId: targetUserId }, { leftAt: new Date(), connectionState: 'DISCONNECTED' });
-      const targetSocketId = connectedUsers.get(targetUserId);
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('removed-by-host');
-      }
-      io.to(sessionId).emit('participant-left', { userId: targetUserId });
-    } catch (error) {
-      console.error('Host remove participant error:', error);
-    }
-  });
-  
-  socket.on('host-mute-all', async (data) => {
-    try {
-      const { sessionId } = data;
-      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
-      if (!host) {
-        socket.emit('error', { error: 'Not authorized' });
-        return;
-      }
-      await GroupCallParticipant.updateMany({ sessionId, role: 'PARTICIPANT' }, { isAudioMutedByHost: true, isAudioEnabled: false });
-      io.to(sessionId).emit('host-muted-all');
-    } catch (error) {
-      console.error('Host mute all error:', error);
-    }
-  });
-  
-  socket.on('host-update-settings', async (data) => {
-    try {
-      const { sessionId, settings } = data;
-      const host = await GroupCallParticipant.findOne({ sessionId, userId: socket.userId, role: 'HOST' });
-      if (!host) {
-        socket.emit('error', { error: 'Not authorized' });
-        return;
-      }
-      const groupClass = await GroupClass.findOne({ sessionId });
-      if (groupClass) {
-        if (settings.allowStudentVideo !== undefined) groupClass.allowStudentVideo = settings.allowStudentVideo;
-        if (settings.allowStudentAudio !== undefined) groupClass.allowStudentAudio = settings.allowStudentAudio;
-        if (settings.allowChat !== undefined) groupClass.allowChat = settings.allowChat;
-        if (settings.allowScreenShare !== undefined) groupClass.allowScreenShare = settings.allowScreenShare;
-        if (settings.allowWhiteboard !== undefined) groupClass.allowWhiteboard = settings.allowWhiteboard;
-        await groupClass.save();
-      }
-      io.to(sessionId).emit('settings-updated', settings);
-    } catch (error) {
-      console.error('Host update settings error:', error);
-    }
-  });
-  
-  socket.on('class-chat-message', async (data) => {
-    try {
-      const { sessionId, message, isPrivate, recipientId } = data;
-      const user = await User.findById(socket.userId).select('name avatar');
-      const chatMessage = await ClassChatMessage.create({
-        sessionId,
-        senderId: socket.userId,
-        senderName: user.name,
-        message,
-        isPrivate: isPrivate || false,
-        recipientId: recipientId || null
-      });
-      const messageData = {
-        id: chatMessage._id.toString(),
-        senderId: socket.userId,
-        senderName: user.name,
-        senderAvatar: user.avatar,
-        message,
-        isPrivate,
-        timestamp: chatMessage.createdAt
-      };
-      if (isPrivate && recipientId) {
-        const recipientSocketId = connectedUsers.get(recipientId);
-        if (recipientSocketId) {
-          io.to(recipientSocketId).emit('class-chat-message', messageData);
-        }
-        socket.emit('class-chat-message', messageData);
-      } else {
-        io.to(sessionId).emit('class-chat-message', messageData);
-      }
-    } catch (error) {
-      console.error('Class chat message error:', error);
-    }
-  });
-  
-  socket.on('whiteboard-draw', async (data) => {
-    try {
-      const { sessionId, stroke } = data;
-      await WhiteboardData.findOneAndUpdate({ sessionId }, { $push: { strokes: stroke }, lastUpdatedBy: socket.userId, updatedAt: new Date() }, { upsert: true });
-      socket.to(sessionId).emit('whiteboard-draw', { userId: socket.userId, stroke });
-    } catch (error) {
-      console.error('Whiteboard draw error:', error);
-    }
-  });
-  
-  socket.on('whiteboard-clear', async (data) => {
-    try {
-      const { sessionId } = data;
-      await WhiteboardData.findOneAndUpdate({ sessionId }, { strokes: [], images: [], lastUpdatedBy: socket.userId, updatedAt: new Date() }, { upsert: true });
-      io.to(sessionId).emit('whiteboard-cleared', { userId: socket.userId });
-    } catch (error) {
-      console.error('Whiteboard clear error:', error);
-    }
-  });
-  
-  socket.on('whiteboard-undo', async (data) => {
-    try {
-      const { sessionId } = data;
-      const whiteboard = await WhiteboardData.findOne({ sessionId });
-      if (whiteboard && whiteboard.strokes.length > 0) {
-        whiteboard.strokes.pop();
-        whiteboard.lastUpdatedBy = socket.userId;
-        whiteboard.updatedAt = new Date();
-        await whiteboard.save();
-        socket.to(sessionId).emit('whiteboard-undo', { userId: socket.userId });
-      }
-    } catch (error) {
-      console.error('Whiteboard undo error:', error);
-    }
-  });
-
-  // WebRTC Offer
-  socket.on('webrtc-offer', async (data) => {
-    try {
-      const { sessionId, targetUserId, offer } = data;
-      
-      if (!socket.userId) {
-        socket.emit('error', { error: 'Not authenticated' });
-        return;
-      }
-
-      // Find target participant's socket
-      const targetParticipant = await GroupCallParticipant.findOne({
-        sessionId,
-        userId: targetUserId,
-        connectionState: 'CONNECTED'
-      });
-
-      if (!targetParticipant || !targetParticipant.socketId) {
-        console.log(`⚠️ Target user ${targetUserId} not found or not connected`);
-        return;
-      }
-
-      // Forward offer to target user
-      io.to(targetParticipant.socketId).emit('webrtc-offer', {
-        fromUserId: socket.userId,
-        offer: offer
-      });
-
-      console.log(`📤 Forwarded offer from ${socket.userId} to ${targetUserId}`);
-
-    } catch (error) {
-      console.error('❌ WebRTC offer error:', error);
-    }
-  });
-
-  // WebRTC Answer
-  socket.on('webrtc-answer', async (data) => {
-    try {
-      const { sessionId, targetUserId, answer } = data;
-      
-      if (!socket.userId) {
-        socket.emit('error', { error: 'Not authenticated' });
-        return;
-      }
-
-      // Find target participant's socket
-      const targetParticipant = await GroupCallParticipant.findOne({
-        sessionId,
-        userId: targetUserId,
-        connectionState: 'CONNECTED'
-      });
-
-      if (!targetParticipant || !targetParticipant.socketId) {
-        console.log(`⚠️ Target user ${targetUserId} not found or not connected`);
-        return;
-      }
-
-      // Forward answer to target user
-      io.to(targetParticipant.socketId).emit('webrtc-answer', {
-        fromUserId: socket.userId,
-        answer: answer
-      });
-
-      console.log(`📤 Forwarded answer from ${socket.userId} to ${targetUserId}`);
-
-    } catch (error) {
-      console.error('❌ WebRTC answer error:', error);
-    }
-  });
-
-  // ICE Candidate
-  socket.on('ice-candidate', async (data) => {
-    try {
-      const { sessionId, targetUserId, candidate } = data;
-      
-      if (!socket.userId) {
-        socket.emit('error', { error: 'Not authenticated' });
-        return;
-      }
-
-      // Find target participant's socket
-      const targetParticipant = await GroupCallParticipant.findOne({
-        sessionId,
-        userId: targetUserId,
-        connectionState: 'CONNECTED'
-      });
-
-      if (!targetParticipant || !targetParticipant.socketId) {
-        return;
-      }
-
-      // Forward ICE candidate to target user
-      io.to(targetParticipant.socketId).emit('ice-candidate', {
-        fromUserId: socket.userId,
-        candidate: candidate
-      });
-
-    } catch (error) {
-      console.error('❌ ICE candidate error:', error);
-    }
-  });
-
-  // Media state updates (video/audio/screen share)
-  socket.on('media-state-changed', async (data) => {
-    try {
-      const { sessionId, isVideoEnabled, isAudioEnabled, isScreenSharing } = data;
-      
-      if (!socket.userId) {
-        socket.emit('error', { error: 'Not authenticated' });
-        return;
-      }
-
-      // Update participant state
-      await GroupCallParticipant.findOneAndUpdate(
-        { sessionId, userId: socket.userId },
-        {
-          isVideoEnabled: isVideoEnabled !== undefined ? isVideoEnabled : undefined,
-          isAudioEnabled: isAudioEnabled !== undefined ? isAudioEnabled : undefined,
-          isScreenSharing: isScreenSharing !== undefined ? isScreenSharing : undefined
-        }
-      );
-
-      // Broadcast to all other participants in the session
-      socket.to(sessionId).emit('participant-media-changed', {
-        userId: socket.userId,
-        isVideoEnabled,
-        isAudioEnabled,
-        isScreenSharing
-      });
-
-      console.log(`📡 Media state changed for ${socket.userId}: video=${isVideoEnabled}, audio=${isAudioEnabled}, screen=${isScreenSharing}`);
-
-    } catch (error) {
-      console.error('❌ Media state change error:', error);
-    }
-  });
-
-    socket.on('disconnect', async (reason) => {
-    console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
-    
-    // 1-on-1 call cleanup
-    if (socket.userId && activeCalls.has(socket.userId)) {
-      const otherUserId = activeCalls.get(socket.userId);
-      activeCalls.delete(socket.userId);
-      if (otherUserId) {
-        activeCalls.delete(otherUserId);
-        const otherSocketId = connectedUsers.get(otherUserId);
-        if (otherSocketId) {
-          io.to(otherSocketId).emit('call-ended', { userId: socket.userId, reason: 'disconnected' });
-        }
-      }
-    }
-    
-    // User online status cleanup
-    if (socket.userId) {
-      connectedUsers.delete(socket.userId);
-      onlineUsers.delete(socket.userId);
-      const lastSeen = new Date();
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: false,
-        lastSeen: lastSeen
-      });
-      
-      // ✅ FIX: Only broadcast to conversation partners, not everyone
-      try {
-        const conversations = await Conversation.find({
-          $or: [
-            { teacherId: socket.userId },
-            { studentId: socket.userId }
-          ]
-        }).lean();
-        
-        // Notify each conversation partner individually
-        for (const conv of conversations) {
-          const partnerId = conv.teacherId.toString() === socket.userId 
-            ? conv.studentId.toString() 
-            : conv.teacherId.toString();
-          
-          io.to(partnerId).emit('user_offline', { 
-            userId: socket.userId,
-            lastSeen: lastSeen.toISOString()
-          });
-        }
-        
-        console.log(`📴 User ${socket.userId} offline status sent to ${conversations.length} partners`);
-      } catch (error) {
-        console.error('Error broadcasting offline status:', error);
-      }
     }
 
-    // ========= GROUP CALL CLEANUP =========
-    // ========= GROUP CALL CLEANUP WITH GRACE PERIOD =========
-// ========= GROUP CALL CLEANUP WITH GRACE PERIOD =========
-if (socket.callSessionId && socket.callUserId) {
-  const sessionId = socket.callSessionId;
-  const userId = socket.callUserId;
-  const userName = socket.callUserName || userId; // ✅ ADD THIS LINE
-  const wasHost = socket.callRole === 'HOST';
-  
-  console.log(`⏳ ${userName} disconnected from ${sessionId}, waiting 10s for reconnection...`);
-  
-  // ✅ Wait 10 seconds before marking as left
-  const timerId = setTimeout(() => {
-    console.log(`🔴 ${userId} did not reconnect, marking as left`);
-    
-    // Notify room
-    if (wasHost) {
-  io.to(sessionId).emit('host-left', {
-    userId: userId, // ✅ ADD THIS LINE
-    message: 'Host has disconnected'
-  });
-}
-    
-    io.to(sessionId).emit('participant-left', { userId });
-    
-    // Clean up timer
-    disconnectTimers.delete(userId);
-  }, 10000); // 10 second grace period
-  
-  // Store timer so we can cancel it if user reconnects
-  disconnectTimers.set(userId, timerId);
-}
-  });
-  socket.on('error', (error) => {
-    console.error('❌ Socket error:', error);
-  });
+    // Get all sockets in this room to send participant list
+    const socketsInRoom = await io.in(sessionId).fetchSockets();
+    const participants = socketsInRoom
+      .filter(s => s.id !== socket.id && s.callUserId) // Exclude self
+      .map(s => ({
+        userId: s.callUserId,
+        name: s.callUserName,
+        role: s.callRole,
+        isVideoEnabled: false, // Client will update
+        isAudioEnabled: false
+      }));
+
+    // Check if host is present
+    const hostJoined = socketsInRoom.some(s => s.callRole === 'HOST');
+
+    // Send existing participants to new user
+    socket.emit('existing-participants', {
+      participants,
+      hostJoined
+    });
+
+    // Notify others about new participant
+    socket.to(sessionId).emit('participant-joined', {
+      userId,
+      name: userName,
+      role,
+      isVideoEnabled: isVideoEnabled || false,
+      isAudioEnabled: isAudioEnabled || false
+    });
+
+    console.log(`✅ ${userName} joined, sent ${participants.length} existing participants`);
+
+  } catch (error) {
+    console.error('Join error:', error);
+    socket.emit('group-call-error', { message: error.message });
+  }
 });
 
+// Leave group call
+socket.on('leave-group-call', async (data) => {
+  try {
+    const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
+    const wasHost = socket.callRole === 'HOST';
+    
+    console.log(`👋 ${userId} leaving ${sessionId}`);
+    
+    socket.leave(sessionId);
+    
+    // Notify others
+    socket.to(sessionId).emit('participant-left', { userId });
+    
+    // If host left, notify room
+    if (wasHost) {
+      socket.to(sessionId).emit('host-left', {
+        message: 'Host has left the call'
+      });
+    }
+    
+    socket.callSessionId = null;
+    socket.callUserId = null;
+
+  } catch (error) {
+    console.error('Leave error:', error);
+  }
+});
+
+// End call (host only)
+socket.on('end-group-call', async (data) => {
+  try {
+    const { sessionId } = typeof data === 'string' ? JSON.parse(data) : data;
+
+    if (socket.callRole !== 'HOST') {
+      socket.emit('group-call-error', { message: 'Only host can end call' });
+      return;
+    }
+
+    console.log(`🛑 Host ending ${sessionId}`);
+
+    // Update class status
+    await GroupClass.findOneAndUpdate(
+      { sessionId },
+      { status: 'COMPLETED', endedAt: new Date() }
+    );
+
+    // Notify all participants
+    io.to(sessionId).emit('call-ended-by-host', {
+      message: 'Class ended by teacher'
+    });
+
+    console.log(`✅ Call ${sessionId} ended by host`);
+
+  } catch (error) {
+    console.error('End call error:', error);
+  }
+});
+
+// WebRTC Offer - relay to target
+socket.on('webrtc-offer', async (data) => {
+  try {
+    const { sessionId, targetUserId, offer } = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    // Find target socket in room
+    const socketsInRoom = await io.in(sessionId).fetchSockets();
+    const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
+    
+    if (targetSocket) {
+      targetSocket.emit('webrtc-offer', {
+        fromUserId: socket.callUserId,
+        offer
+      });
+    }
+  } catch (error) {
+    console.error('Offer error:', error);
+  }
+});
+
+// WebRTC Answer - relay to target
+socket.on('webrtc-answer', async (data) => {
+  try {
+    const { sessionId, targetUserId, answer } = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    const socketsInRoom = await io.in(sessionId).fetchSockets();
+    const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
+    
+    if (targetSocket) {
+      targetSocket.emit('webrtc-answer', {
+        fromUserId: socket.callUserId,
+        answer
+      });
+    }
+  } catch (error) {
+    console.error('Answer error:', error);
+  }
+});
+
+// ICE Candidate - relay to target
+socket.on('webrtc-ice-candidate', async (data) => {
+  try {
+    const { sessionId, targetUserId, candidate } = typeof data === 'string' ? JSON.parse(data) : data;
+    
+    const socketsInRoom = await io.in(sessionId).fetchSockets();
+    const targetSocket = socketsInRoom.find(s => s.callUserId === targetUserId);
+    
+    if (targetSocket) {
+      targetSocket.emit('webrtc-ice-candidate', {
+        fromUserId: socket.callUserId,
+        candidate
+      });
+    }
+  } catch (error) {
+    console.error('ICE error:', error);
+  }
+});
+
+// Toggle Audio - broadcast to room
+socket.on('toggle-audio', (data) => {
+  try {
+    const { sessionId, userId, isAudioEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('media-state-changed', {
+      userId,
+      isAudioEnabled
+    });
+  } catch (error) {
+    console.error('Toggle audio error:', error);
+  }
+});
+
+// Toggle Video - broadcast to room
+socket.on('toggle-video', (data) => {
+  try {
+    const { sessionId, userId, isVideoEnabled } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('media-state-changed', {
+      userId,
+      isVideoEnabled
+    });
+  } catch (error) {
+    console.error('Toggle video error:', error);
+  }
+});
+
+// Start Screen Share - broadcast to room
+socket.on('start-screen-share', (data) => {
+  try {
+    const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('screen-share-started', { userId });
+  } catch (error) {
+    console.error('Screen share error:', error);
+  }
+});
+
+// Stop Screen Share - broadcast to room
+socket.on('stop-screen-share', (data) => {
+  try {
+    const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('screen-share-stopped', { userId });
+  } catch (error) {
+    console.error('Stop screen share error:', error);
+  }
+});
+
+// Raise Hand - broadcast to room
+socket.on('raise-hand', (data) => {
+  try {
+    const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('hand-raised', { userId });
+  } catch (error) {
+    console.error('Raise hand error:', error);
+  }
+});
+
+// Lower Hand - broadcast to room
+socket.on('lower-hand', (data) => {
+  try {
+    const { sessionId, userId } = typeof data === 'string' ? JSON.parse(data) : data;
+    socket.to(sessionId).emit('hand-lowered', { userId });
+  } catch (error) {
+    console.error('Lower hand error:', error);
+  }
+});
+
+// Class Chat - broadcast to room
+socket.on('class-chat-message', async (data) => {
+  try {
+    const payload = typeof data === 'string' ? JSON.parse(data) : data;
+    const { sessionId, userId, userName, message, timestamp } = payload;
+
+    // Optionally save to DB
+    await ClassChatMessage.create({
+      sessionId,
+      senderId: userId,
+      senderName: userName,
+      message,
+      type: 'TEXT',
+      isPrivate: false
+    });
+
+    // Broadcast to room (including sender for confirmation)
+    io.to(sessionId).emit('class-chat-message', {
+      userId,
+      userName,
+      message,
+      timestamp: timestamp || Date.now()
+    });
+  } catch (error) {
+    console.error('Chat error:', error);
+  }
+});
+
+// Whiteboard Draw - broadcast to room
+socket.on('whiteboard-draw', async (data) => {
+  try {
+    const payload = typeof data === 'string' ? JSON.parse(data) : data;
+    const { sessionId, userId, strokeData } = payload;
+
+    // Optionally save to DB
+    let whiteboard = await WhiteboardData.findOne({ sessionId });
+    if (!whiteboard) {
+      whiteboard = await WhiteboardData.create({
+        sessionId,
+        strokes: [],
+        images: []
+      });
+    }
+    whiteboard.strokes.push(strokeData);
+    await whiteboard.save();
+
+    // Broadcast to others (not sender)
+    socket.to(sessionId).emit('whiteboard-draw', {
+      userId,
+      strokeData
+    });
+  } catch (error) {
+    console.error('Whiteboard draw error:', error);
+  }
+});
+
+// Whiteboard Clear - broadcast to room
+socket.on('whiteboard-clear', async (data) => {
+  try {
+    const payload = typeof data === 'string' ? JSON.parse(data) : data;
+    const { sessionId, userId } = payload;
+
+    // Clear in DB
+    await WhiteboardData.findOneAndUpdate(
+      { sessionId },
+      { strokes: [], images: [], updatedAt: new Date() },
+      { upsert: true }
+    );
+
+    // Broadcast to all
+    io.to(sessionId).emit('whiteboard-clear', { userId });
+  } catch (error) {
+    console.error('Whiteboard clear error:', error);
+  }
+});
+
+// ========= END OF GROUP CALL HANDLERS =========
+
+socket.on('disconnect', async (reason) => {
+  console.log(`🔌 User disconnected: ${socket.id}, Reason: ${reason}`);
+  
+  // 1-on-1 call cleanup
+  if (socket.userId && activeCalls.has(socket.userId)) {
+    const otherUserId = activeCalls.get(socket.userId);
+    activeCalls.delete(socket.userId);
+    if (otherUserId) {
+      activeCalls.delete(otherUserId);
+      const otherSocketId = connectedUsers.get(otherUserId);
+      if (otherSocketId) {
+        io.to(otherSocketId).emit('call-ended', { userId: socket.userId, reason: 'disconnected' });
+      }
+    }
+  }
+  
+  // User online status cleanup
+  if (socket.userId) {
+    connectedUsers.delete(socket.userId);
+    onlineUsers.delete(socket.userId);
+    const lastSeen = new Date();
+    await User.findByIdAndUpdate(socket.userId, {
+      isOnline: false,
+      lastSeen: lastSeen
+    });
+    
+    // ✅ FIX: Only broadcast to conversation partners, not everyone
+    try {
+      const conversations = await Conversation.find({
+        $or: [
+          { teacherId: socket.userId },
+          { studentId: socket.userId }
+        ]
+      }).lean();
+      
+      // Notify each conversation partner individually
+      for (const conv of conversations) {
+        const partnerId = conv.teacherId.toString() === socket.userId 
+          ? conv.studentId.toString() 
+          : conv.teacherId.toString();
+        
+        io.to(partnerId).emit('user_offline', { 
+          userId: socket.userId,
+          lastSeen: lastSeen.toISOString()
+        });
+      }
+      
+      console.log(`📴 User ${socket.userId} offline status sent to ${conversations.length} partners`);
+    } catch (error) {
+      console.error('Error broadcasting offline status:', error);
+    }
+  }
+
+  // ========= GROUP CALL CLEANUP WITH GRACE PERIOD =========
+  if (socket.callSessionId && socket.callUserId) {
+    const sessionId = socket.callSessionId;
+    const userId = socket.callUserId;
+    const userName = socket.callUserName || userId;
+    const wasHost = socket.callRole === 'HOST';
+    
+    console.log(`⏳ ${userName} disconnected from ${sessionId}, waiting 10s for reconnection...`);
+    
+    // ✅ Wait 10 seconds before marking as left
+    const timerId = setTimeout(() => {
+      console.log(`🔴 ${userId} did not reconnect, marking as left`);
+      
+      // Notify room
+      if (wasHost) {
+        io.to(sessionId).emit('host-left', {
+          userId: userId,
+          message: 'Host has disconnected'
+        });
+      }
+      
+      io.to(sessionId).emit('participant-left', { userId });
+      
+      // Clean up timer
+      disconnectTimers.delete(userId);
+    }, 10000); // 10 second grace period
+    
+    // Store timer so we can cancel it if user reconnects
+    disconnectTimers.set(userId, timerId);
+  }
+});
+
+socket.on('error', (error) => {
+  console.error('❌ Socket error:', error);
+});
 // ========= END OF GROUP CALL HANDLERS =========
 // ========= ROOT & HEALTH ENDPOINTS =========
 app.get('/', (req, res) => {
