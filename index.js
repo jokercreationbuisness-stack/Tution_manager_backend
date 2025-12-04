@@ -1052,6 +1052,68 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Mark all messages in a conversation as read (for notification "Mark as Read" button)
+socket.on('mark_all_read', async (data) => {
+  try {
+    const { conversationId } = data;
+    
+    if (!socket.userId) return;
+    
+    console.log(`📖 Marking all messages as read in conversation: ${conversationId}`);
+    
+    // Get all unread messages sent TO this user in this conversation
+    const unreadMessages = await Message.find({
+      conversationId: conversationId,
+      receiverId: socket.userId,
+      read: false
+    });
+    
+    if (unreadMessages.length === 0) {
+      console.log('No unread messages to mark');
+      return;
+    }
+    
+    // Mark all as read
+    await Message.updateMany(
+      {
+        conversationId: conversationId,
+        receiverId: socket.userId,
+        read: false
+      },
+      {
+        $set: {
+          read: true,
+          readAt: new Date()
+        }
+      }
+    );
+    
+    // Reset unread count for this user
+    if (socket.role === 'TEACHER') {
+      await Conversation.findByIdAndUpdate(conversationId, {
+        unreadCountTeacher: 0
+      });
+    } else {
+      await Conversation.findByIdAndUpdate(conversationId, {
+        unreadCountStudent: 0
+      });
+    }
+    
+    // Emit message_read event for each message (for blue tick updates)
+    unreadMessages.forEach(msg => {
+      io.to(`conversation_${conversationId}`).emit('message_read', {
+        messageId: msg._id.toString(),
+        readBy: socket.userId
+      });
+    });
+    
+    console.log(`✅ Marked ${unreadMessages.length} messages as read`);
+    
+  } catch (error) {
+    console.error('❌ Mark all read error:', error);
+  }
+});
+
   socket.on('user_online', async () => {
     if (socket.userId) {
       await User.findByIdAndUpdate(socket.userId, {
