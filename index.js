@@ -962,50 +962,55 @@ io.on('connection', (socket) => {
       };
 
       // ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
-      const receiverSocketId = connectedUsers.get(receiverId.toString());
+      // ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
+const receiverSocketId = connectedUsers.get(receiverId.toString());
 
-      if (receiverSocketId) {
-        // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
-        await Message.findByIdAndUpdate(message._id, {
-          delivered: true,
-          deliveredAt: new Date()
-        });
-        
-        messagePayload.delivered = true;
-        messagePayload.deliveredAt = new Date();
-        
-        // Emit to conversation room with delivered status
-        io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-        
+// Verify the socket is actually still connected
+const receiverSocket = receiverSocketId ? io.sockets.sockets.get(receiverSocketId) : null;
+const isReceiverOnline = receiverSocket && receiverSocket.connected;
+
+if (isReceiverOnline) {
+  // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
+  await Message.findByIdAndUpdate(message._id, {
+    delivered: true,
+    deliveredAt: new Date()
+  });
+  
+  messagePayload.delivered = true;
+  messagePayload.deliveredAt = new Date();
+  
+  // Emit to conversation room with delivered status
+  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+  
   // ✅ FIX: ALSO emit to receiver's personal room for background notifications
   io.to(receiverId.toString()).emit('new_message', messagePayload);
-        
+  
   // Emit message_delivered event for double tick
   io.to(`conversation_${conversationId}`).emit('message_delivered', {
     messageId: message._id.toString()
   });
-        
-        console.log(`✅ Message delivered (online): ${message._id}`);
-      } else {
-        // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
-        messagePayload.delivered = false;
-        
-        // Emit to conversation room (sender will see single tick)
-        io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-        
-        // Store pending notification for offline user
-        const sender = await User.findById(socket.userId);
-        await PendingNotification.create({
-          userId: receiverId,
-          type: 'message',
-          senderName: sender.name,
-          senderId: socket.userId,
-          senderAvatar: sender.avatar,
-          conversationId: conversationId,
-          content: content
-        });
-        console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
-      }
+  
+  console.log(`✅ Message delivered (online): ${message._id}`);
+} else {
+  // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
+  messagePayload.delivered = false;
+  
+  // Emit to conversation room (sender will see single tick)
+  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+  
+  // Store pending notification for offline user
+  const sender = await User.findById(socket.userId);
+  await PendingNotification.create({
+    userId: receiverId,
+    type: 'message',
+    senderName: sender.name,
+    senderId: socket.userId,
+    senderAvatar: sender.avatar,
+    conversationId: conversationId,
+    content: content
+  });
+  console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
+}
 
       socket.emit('message_sent', { 
         tempId, 
