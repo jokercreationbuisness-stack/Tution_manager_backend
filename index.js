@@ -977,10 +977,13 @@ io.on('connection', (socket) => {
         // Emit to conversation room with delivered status
         io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
         
-        // Emit message_delivered event for double tick
-        io.to(`conversation_${conversationId}`).emit('message_delivered', {
-          messageId: message._id.toString()
-        });
+  // ✅ FIX: ALSO emit to receiver's personal room for background notifications
+  io.to(receiverId.toString()).emit('new_message', messagePayload);
+        
+  // Emit message_delivered event for double tick
+  io.to(`conversation_${conversationId}`).emit('message_delivered', {
+    messageId: message._id.toString()
+  });
         
         console.log(`✅ Message delivered (online): ${message._id}`);
       } else {
