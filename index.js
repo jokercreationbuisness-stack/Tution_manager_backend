@@ -1166,58 +1166,88 @@ socket.on('mark_all_read', async (data) => {
   });
 
   // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
-  socket.on('call-user', async (data) => {
-    try {
-      const { receiverId, callType, offer } = data;
-      const callerId = socket.userId;
-      
-      if (!callerId || !receiverId) {
-        socket.emit('call-error', { error: 'Invalid call data' });
-        return;
-      }
+  // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
+socket.on('call-user', async (data) => {
+  try {
+    const { receiverId, callType, offer, conversationId } = data;  // ✅ ADD conversationId
+    const callerId = socket.userId;
+    
+    if (!callerId || !receiverId) {
+      socket.emit('call-error', { error: 'Invalid call data' });
+      return;
+    }
 
-      // ========= ADD THIS BLOCKING CHECK HERE =========
-      const blocked = await isBlocked(receiverId, callerId);
-      if (blocked) {
-        console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
-        socket.emit('call-error', { error: 'User is unavailable' });
-        return;
+    // Check if blocked
+    const blocked = await isBlocked(receiverId, callerId);
+    if (blocked) {
+      console.log(`🚫 Call blocked: ${callerId} -> ${receiverId}`);
+      socket.emit('call-error', { error: 'User is unavailable' });
+      return;
+    }
+    
+    // Check authorization (teacher-student link)
+    const isAuthorized = await checkCallAuthorization(callerId, receiverId);
+    if (!isAuthorized) {
+      socket.emit('call-error', { error: 'Not authorized' });
+      return;
+    }
+    
+    // Get caller info
+    const caller = await User.findById(callerId).select('name avatar');
+    
+    // Find receiver's socket
+    const receiverSocketId = onlineUsers.get(receiverId);
+    
+    // ✅ FIX: Verify socket is actually connected (not stale)
+    const receiverSocket = receiverSocketId ? io.sockets.sockets.get(receiverSocketId) : null;
+    
+    if (!receiverSocket || !receiverSocket.connected) {
+      console.log(`📞 Receiver ${receiverId} socket is stale/offline`);
+      
+      // ✅ Clean up stale socket from map
+      if (receiverSocketId) {
+        onlineUsers.delete(receiverId);
+        connectedUsers.delete(receiverId);
       }
       
-      // Check authorization (teacher-student link)
-      const isAuthorized = await checkCallAuthorization(callerId, receiverId);
-      if (!isAuthorized) {
-        socket.emit('call-error', { error: 'Not authorized' });
-        return;
-      }
-      
-      // Get caller info
-      const caller = await User.findById(callerId).select('name avatar');
-      
-      // Find receiver's socket
-      const receiverSocketId = onlineUsers.get(receiverId);
-      if (!receiverSocketId) {
-        socket.emit('call-error', { error: 'User offline' });
-        return;
-      }
-      
-      // Send call notification to receiver
-      io.to(receiverSocketId).emit('call-made', {
-        callerId: callerId,
-        callerName: caller.name,
-        callerAvatar: caller.avatar,
-        callType: callType,
-        offer: offer
+      // Store missed call for offline user
+      await PendingNotification.create({
+        userId: receiverId,
+        type: 'missed_call',
+        senderName: caller.name,
+        senderId: callerId,
+        senderAvatar: caller.avatar,
+        conversationId: conversationId || '',
+        callType: callType === 'video' ? 'video call' : 'voice call',
+        content: `Missed ${callType === 'video' ? 'video' : 'voice'} call`
       });
       
-      // Notify caller that call is ringing
-      socket.emit('call-ringing');
-      
-    } catch (error) {
-      console.error('Call user error:', error);
-      socket.emit('call-error', { error: 'Failed to initiate call' });
+      socket.emit('call-error', { error: 'User offline' });
+      return;
     }
-  });
+    
+    console.log(`📞 Sending call to ${receiverId} (socket: ${receiverSocketId})`);
+    
+    // ✅ FIX: Include conversationId in call-made event
+    receiverSocket.emit('call-made', {
+      callerId: callerId,
+      callerName: caller.name,
+      callerAvatar: caller.avatar,
+      callType: callType,
+      offer: offer,
+      conversationId: conversationId || ''  // ✅ ADD THIS
+    });
+    
+    // Notify caller that call is ringing
+    socket.emit('call-ringing');
+    
+    console.log(`✅ Call notification sent to ${receiverId}`);
+    
+  } catch (error) {
+    console.error('Call user error:', error);
+    socket.emit('call-error', { error: 'Failed to initiate call' });
+  }
+});
   
   // Answer call
   socket.on('answer-call', async (data) => {
