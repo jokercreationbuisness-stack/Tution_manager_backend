@@ -859,203 +859,146 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_message', async (data) => {
-    try {
-      const { 
-        conversationId, 
-        receiverId, 
-        content, 
-        type, 
-        iv, 
-        tempId, 
-        replyTo,
-        fileUrl,
-        fileName,
-        fileSize,
-        mimeType,
-        duration
-      } = data;
-      
-      if (!socket.userId) {
-        socket.emit('message_error', { error: 'Not authenticated', tempId });
-        return;
-      }
-
-      // ========= ADD THIS BLOCKING CHECK HERE =========
-      const blocked = await isBlocked(receiverId, socket.userId);
-      if (blocked) {
-        console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
-        socket.emit('message_sent', { 
-          tempId, 
-          messageId: Date.now().toString()
-        });
-        return; // Don't deliver message
-      }
-      // ========= END OF BLOCKING CHECK =========
-
-      if (!conversationId || !receiverId || !content) {
-        socket.emit('message_error', { 
-          error: 'Missing required fields',
-          tempId 
-        });
-        return;
-      }
-
-      const conversation = await Conversation.findById(conversationId);
-      if (!conversation) {
-        socket.emit('message_error', { error: 'Conversation not found', tempId });
-        return;
-      }
-
-      if (conversation.teacherId.toString() !== socket.userId && 
-          conversation.studentId.toString() !== socket.userId) {
-        socket.emit('message_error', { error: 'Not authorized', tempId });
-        return;
-      }
-
-      // ✅ Build message data with ALL fields
-      const messageData = {
-        conversationId,
-        senderId: socket.userId,
-        receiverId,
-        content,
-        type: type || 'TEXT',
-        fileUrl: fileUrl || null,
-        fileName: fileName || null,
-        fileSize: fileSize || null,
-        mimeType: mimeType || null,
-        duration: duration || null,
-        iv,
-        delivered: false,  // ❌ Start as NOT delivered
-        read: false
-      };
-      
-      // Add replyTo if provided
-      if (replyTo && replyTo.messageId) {
-        messageData.replyTo = {
-          messageId: replyTo.messageId,
-          content: replyTo.content || '',
-          senderId: replyTo.senderId,
-          senderName: replyTo.senderName || 'Unknown',
-          type: replyTo.type || 'TEXT'
-        };
-      }
-
-      const message = await Message.create(messageData);
-
-      await Conversation.findByIdAndUpdate(conversationId, {
-        lastMessage: type === 'TEXT' ? content.substring(0, 100) : `Sent a ${type?.toLowerCase() || 'file'}`,
-        lastMessageAt: new Date(),
-        lastMessageSenderId: socket.userId,
-        $inc: {
-          unreadCountTeacher: socket.role === 'STUDENT' ? 1 : 0,
-          unreadCountStudent: socket.role === 'TEACHER' ? 1 : 0
-        }
-      });
-
-      const populatedMessage = await Message.findById(message._id)
-        .populate('senderId', 'name avatar role')
-        .lean();
-
-      const messagePayload = {
-        ...populatedMessage,
-        id: populatedMessage._id.toString()
-      };
-
-      // ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
-      // ✅ CHECK IF RECEIVER IS ONLINE (WhatsApp-style)
-const receiverSocketId = connectedUsers.get(receiverId.toString());
-
-// Verify the socket is actually still connected
-const receiverSocket = receiverSocketId ? io.sockets.sockets.get(receiverSocketId) : null;
-const isReceiverOnline = receiverSocket && receiverSocket.connected;
-
-if (isReceiverOnline) {
-  // ✅ RECEIVER IS ONLINE - Mark as delivered (double tick)
-  await Message.findByIdAndUpdate(message._id, {
-    delivered: true,
-    deliveredAt: new Date()
-  });
-  
-  messagePayload.delivered = true;
-  messagePayload.deliveredAt = new Date();
-  
-  // Emit to conversation room with delivered status
-  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-  
-  // ✅ FIX: ALSO emit to receiver's personal room for background notifications
-  io.to(receiverId.toString()).emit('new_message', messagePayload);
-  
-  // Emit message_delivered event for double tick
-  io.to(`conversation_${conversationId}`).emit('message_delivered', {
-    messageId: message._id.toString()
-  });
-  
-  console.log(`✅ Message delivered (online): ${message._id}`);
-} else {
-  // ❌ RECEIVER IS OFFLINE - Keep as sent only (single tick)
-  messagePayload.delivered = false;
-  
-  // Emit to conversation room (sender will see single tick)
-  io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
-  
-  // Store pending notification for offline user
-  const sender = await User.findById(socket.userId);
-  await PendingNotification.create({
-    userId: receiverId,
-    type: 'message',
-    senderName: sender.name,
-    senderId: socket.userId,
-    senderAvatar: sender.avatar,
-    conversationId: conversationId,
-    content: content
-  });
-  console.log(`📧 Stored pending notification for OFFLINE user ${receiverId}`);
-}
-
-      socket.emit('message_sent', { 
-        tempId, 
-        messageId: message._id.toString() 
-      });
-
-    } catch (error) {
-      console.error('❌ Send message error:', error);
-      socket.emit('message_error', { 
-        error: 'Failed to send message', 
-        tempId: data.tempId 
-      });
+  try {
+    const { 
+      conversationId, 
+      receiverId, 
+      content, 
+      type, 
+      iv, 
+      tempId, 
+      replyTo,
+      fileUrl,
+      fileName,
+      fileSize,
+      mimeType,
+      duration
+    } = data;
+    
+    if (!socket.userId) {
+      socket.emit('message_error', { error: 'Not authenticated', tempId });
+      return;
     }
-  });
+
+    // Check if blocked
+    const blocked = await isBlocked(receiverId, socket.userId);
+    if (blocked) {
+      console.log(`🚫 Message blocked: ${socket.userId} -> ${receiverId}`);
+      socket.emit('message_sent', { tempId, messageId: Date.now().toString() });
+      return;
+    }
+
+    if (!conversationId || !receiverId || !content) {
+      socket.emit('message_error', { error: 'Missing required fields', tempId });
+      return;
+    }
+
+    // Get sender info for relay
+    const sender = await User.findById(socket.userId).select('name avatar role');
+    
+    // Generate a message ID for tracking
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Build message payload for relay (NO MongoDB save)
+    const messagePayload = {
+      id: messageId,
+      _id: messageId,
+      conversationId,
+      senderId: {
+        _id: socket.userId,
+        id: socket.userId,
+        name: sender.name,
+        avatar: sender.avatar,
+        role: sender.role
+      },
+      receiverId,
+      content,
+      type: type || 'TEXT',
+      fileUrl: fileUrl || null,
+      fileName: fileName || null,
+      fileSize: fileSize || null,
+      mimeType: mimeType || null,
+      duration: duration || null,
+      iv,
+      replyTo: replyTo || null,
+      delivered: false,
+      read: false,
+      createdAt: new Date().toISOString()
+    };
+
+    // Check if receiver is online
+    const receiverSocketId = connectedUsers.get(receiverId.toString());
+    const receiverSocket = receiverSocketId ? io.sockets.sockets.get(receiverSocketId) : null;
+    const isReceiverOnline = receiverSocket && receiverSocket.connected;
+
+    if (isReceiverOnline) {
+      // Receiver is online - relay message directly
+      messagePayload.delivered = true;
+      messagePayload.deliveredAt = new Date().toISOString();
+      
+      // Emit to conversation room
+      io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+      
+      // Also emit to receiver's personal room
+      io.to(receiverId.toString()).emit('new_message', messagePayload);
+      
+      // Emit delivery confirmation
+      io.to(`conversation_${conversationId}`).emit('message_delivered', {
+        messageId: messageId
+      });
+      
+      console.log(`✅ Message relayed (online): ${messageId}`);
+    } else {
+      // Receiver is offline - just emit to conversation room
+      // The receiver will get the message when they come online (from their local DB)
+      io.to(`conversation_${conversationId}`).emit('new_message', messagePayload);
+      
+      // Store minimal notification for offline user
+      await PendingNotification.create({
+        userId: receiverId,
+        type: 'message',
+        senderName: sender.name,
+        senderId: socket.userId,
+        senderAvatar: sender.avatar,
+        conversationId: conversationId,
+        content: content.substring(0, 100)
+      });
+      
+      console.log(`📧 Message relayed, notification stored for offline user ${receiverId}`);
+    }
+
+    // Confirm to sender
+    socket.emit('message_sent', { 
+      tempId, 
+      messageId: messageId 
+    });
+
+  } catch (error) {
+    console.error('❌ Send message error:', error);
+    socket.emit('message_error', { 
+      error: 'Failed to send message', 
+      tempId: data.tempId 
+    });
+  }
+});
 
   socket.on('mark_read', async (data) => {
-    try {
-      const { messageId, conversationId } = data;
-      
-      if (!socket.userId) return;
+  try {
+    const { messageId, conversationId } = data;
+    
+    if (!socket.userId) return;
 
-      await Message.findByIdAndUpdate(messageId, {
-        read: true,
-        readAt: new Date()
-      });
+    // Just relay the read receipt - no MongoDB update
+    io.to(`conversation_${conversationId}`).emit('message_read', { 
+      messageId,
+      readBy: socket.userId,
+      readAt: new Date().toISOString()
+    });
 
-      if (socket.role === 'TEACHER') {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          unreadCountTeacher: 0
-        });
-      } else {
-        await Conversation.findByIdAndUpdate(conversationId, {
-          unreadCountStudent: 0
-        });
-      }
-
-      io.to(`conversation_${conversationId}`).emit('message_read', { 
-        messageId,
-        readBy: socket.userId 
-      });
-
-    } catch (error) {
-      console.error('❌ Mark read error:', error);
-    }
-  });
+  } catch (error) {
+    console.error('❌ Mark read error:', error);
+  }
+});
 
   // Mark all messages in a conversation as read (for notification "Mark as Read" button)
 socket.on('mark_all_read', async (data) => {
@@ -1066,56 +1009,36 @@ socket.on('mark_all_read', async (data) => {
     
     console.log(`📖 Marking all messages as read in conversation: ${conversationId}`);
     
-    // Get all unread messages sent TO this user in this conversation
-    const unreadMessages = await Message.find({
-      conversationId: conversationId,
-      receiverId: socket.userId,
-      read: false
+    // Just relay the read receipt - no MongoDB update
+    io.to(`conversation_${conversationId}`).emit('all_messages_read', {
+      conversationId,
+      readBy: socket.userId,
+      readAt: new Date().toISOString()
     });
-    
-    if (unreadMessages.length === 0) {
-      console.log('No unread messages to mark');
-      return;
-    }
-    
-    // Mark all as read
-    await Message.updateMany(
-      {
-        conversationId: conversationId,
-        receiverId: socket.userId,
-        read: false
-      },
-      {
-        $set: {
-          read: true,
-          readAt: new Date()
-        }
-      }
-    );
-    
-    // Reset unread count for this user
-    if (socket.role === 'TEACHER') {
-      await Conversation.findByIdAndUpdate(conversationId, {
-        unreadCountTeacher: 0
-      });
-    } else {
-      await Conversation.findByIdAndUpdate(conversationId, {
-        unreadCountStudent: 0
-      });
-    }
-    
-    // Emit message_read event for each message (for blue tick updates)
-    unreadMessages.forEach(msg => {
-      io.to(`conversation_${conversationId}`).emit('message_read', {
-        messageId: msg._id.toString(),
-        readBy: socket.userId
-      });
-    });
-    
-    console.log(`✅ Marked ${unreadMessages.length} messages as read`);
     
   } catch (error) {
     console.error('❌ Mark all read error:', error);
+  }
+});
+
+  socket.on('delete_message', async (data) => {
+  try {
+    const { messageId, conversationId, deleteForEveryone } = data;
+    
+    if (!socket.userId) return;
+    
+    // Relay deletion to all participants
+    io.to(`conversation_${conversationId}`).emit('message_deleted', {
+      messageId,
+      deletedBy: socket.userId,
+      deletedForEveryone: deleteForEveryone || false,
+      deletedAt: new Date().toISOString()
+    });
+    
+    console.log(`🗑️ Message deletion relayed: ${messageId}`);
+    
+  } catch (error) {
+    console.error('❌ Delete message error:', error);
   }
 });
 
@@ -4272,71 +4195,71 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
     const userId = req.userId;
     const role = req.role;
     
-    const blocks = await UserBlock.find({ blockerId: userId }).select('blockedId');
-    const blockedUserIds = blocks.map(block => block.blockedId.toString());
+    // Get linked users instead of stored conversations
+    let linkedUsers = [];
     
-    let query = {};
     if (role === 'TEACHER') {
-      query.teacherId = userId;
-      if (blockedUserIds.length > 0) {
-        query.studentId = { $nin: blockedUserIds };
-      }
+      const links = await TeacherStudentLink.find({ 
+        teacherId: userId, 
+        isActive: true,
+        isBlocked: { $ne: true }
+      }).populate('studentId', 'name email avatar studentCode isOnline lastSeen');
+      
+      linkedUsers = links.map(link => ({
+        id: `conv_${userId}_${link.studentId._id}`,
+        otherUser: {
+          id: link.studentId._id.toString(),
+          name: link.studentId.name,
+          avatar: link.studentId.avatar,
+          role: 'STUDENT',
+          email: link.studentId.email,
+          studentCode: link.studentId.studentCode,
+          isOnline: link.studentId.isOnline,
+          lastSeen: link.studentId.lastSeen
+        },
+        teacher: { id: userId, name: 'Me', role: 'TEACHER' },
+        student: {
+          id: link.studentId._id.toString(),
+          name: link.studentId.name,
+          role: 'STUDENT'
+        },
+        lastMessage: null,
+        lastMessageAt: null,
+        unreadCount: 0,
+        createdAt: link.linkedAt
+      }));
     } else {
-      query.studentId = userId;
-      if (blockedUserIds.length > 0) {
-        query.teacherId = { $nin: blockedUserIds };
-      }
+      const links = await TeacherStudentLink.find({ 
+        studentId: userId, 
+        isActive: true,
+        isBlocked: { $ne: true }
+      }).populate('teacherId', 'name email avatar isOnline lastSeen');
+      
+      linkedUsers = links.map(link => ({
+        id: `conv_${link.teacherId._id}_${userId}`,
+        otherUser: {
+          id: link.teacherId._id.toString(),
+          name: link.teacherId.name,
+          avatar: link.teacherId.avatar,
+          role: 'TEACHER',
+          email: link.teacherId.email,
+          isOnline: link.teacherId.isOnline,
+          lastSeen: link.teacherId.lastSeen
+        },
+        teacher: {
+          id: link.teacherId._id.toString(),
+          name: link.teacherId.name,
+          role: 'TEACHER'
+        },
+        student: { id: userId, name: 'Me', role: 'STUDENT' },
+        lastMessage: null,
+        lastMessageAt: null,
+        unreadCount: 0,
+        createdAt: link.linkedAt
+      }));
     }
     
-    const conversations = await Conversation.find(query)
-      .populate('teacherId', 'name avatar email isOnline lastSeen')
-      .populate('studentId', 'name avatar email studentCode isOnline lastSeen')
-      .populate('lastMessageSenderId', 'name role')
-      .sort({ lastMessageAt: -1 })
-      .lean();
-    
-    const formatted = conversations.map(conv => ({
-      id: conv._id.toString(),
-      teacher: {
-        id: conv.teacherId._id.toString(),
-        name: conv.teacherId.name,
-        avatar: conv.teacherId.avatar,
-        email: conv.teacherId.email,
-        isOnline: conv.teacherId.isOnline,
-        lastSeen: conv.teacherId.lastSeen
-      },
-      student: {
-        id: conv.studentId._id.toString(),
-        name: conv.studentId.name,
-        avatar: conv.studentId.avatar,
-        email: conv.studentId.email,
-        studentCode: conv.studentId.studentCode,
-        isOnline: conv.studentId.isOnline,
-        lastSeen: conv.studentId.lastSeen
-      },
-      otherUser: role === 'TEACHER' ? {
-        id: conv.studentId._id.toString(),
-        name: conv.studentId.name,
-        avatar: conv.studentId.avatar,
-        role: 'STUDENT',
-        isOnline: conv.studentId.isOnline,
-        lastSeen: conv.studentId.lastSeen
-      } : {
-        id: conv.teacherId._id.toString(),
-        name: conv.teacherId.name,
-        avatar: conv.teacherId.avatar,
-        role: 'TEACHER',
-        isOnline: conv.teacherId.isOnline,
-        lastSeen: conv.teacherId.lastSeen
-      },
-      lastMessage: conv.lastMessage,
-      lastMessageAt: conv.lastMessageAt,
-      lastMessageSender: conv.lastMessageSenderId?.name,
-      unreadCount: role === 'TEACHER' ? conv.unreadCountTeacher : conv.unreadCountStudent,
-      createdAt: conv.createdAt
-    }));
-    
-    res.json({ success: true, conversations: formatted });
+    res.json({ success: true, conversations: linkedUsers });
   } catch (error) {
     console.error('Get conversations error:', error);
     res.status(500).json({ error: 'Failed to fetch conversations' });
@@ -4344,56 +4267,9 @@ app.get('/api/chat/conversations', authRequired, async (req, res) => {
 });
 
 app.get('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
-  try {
-    const conversationId = req.params.id;
-    const { page = 1, limit = 50 } = req.query;
-    const skip = (page - 1) * limit;
-    
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found' });
-    }
-    
-    if (conversation.teacherId.toString() !== req.userId && conversation.studentId.toString() !== req.userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
-    
-    const messages = await Message.find({
-      conversationId,
-      deletedForUsers: { $ne: req.userId }
-    })
-    .populate('senderId', 'name avatar role')
-    .sort({ createdAt: -1 })
-    .skip(skip)
-    .limit(parseInt(limit))
-    .lean();
-    
-    // ✅ FIXED: Include replyTo in response
-    const formatted = messages.map(msg => ({
-      id: msg._id.toString(),
-      content: msg.content,
-      type: msg.type,
-      fileUrl: msg.fileUrl,
-      fileName: msg.fileName,
-      fileSize: msg.fileSize,
-      sender: {
-        id: msg.senderId._id.toString(),
-        name: msg.senderId.name,
-        avatar: msg.senderId.avatar,
-        role: msg.senderId.role
-      },
-      replyTo: msg.replyTo || null,  // ← ADD THIS LINE
-      delivered: msg.delivered,
-      read: msg.read,
-      createdAt: msg.createdAt,
-      deleted: msg.deleted
-    })).reverse();
-    
-    res.json({ success: true, messages: formatted });
-  } catch (error) {
-    console.error('Get messages error:', error);
-    res.status(500).json({ error: 'Failed to fetch messages' });
-  }
+  // Messages are stored locally on devices now
+  // This endpoint returns empty - app uses local Room database
+  res.json({ success: true, messages: [] });
 });
 
 app.post('/api/chat/upload-file', authRequired, upload.single('file'), async (req, res) => {
