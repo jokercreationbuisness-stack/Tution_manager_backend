@@ -4339,15 +4339,21 @@ app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (
 });
 
 // 🚀 UPDATED: Local-first message deletion (relay-only approach)
+// 🚀 FIXED: Local-first message deletion (supports both query params and body)
 app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
   try {
     const messageId = req.params.id;
     const deleteForEveryone = req.query.deleteForEveryone === 'true';
-    const { conversationId } = req.body; // Required for socket relay
+    
+    // 🚀 FIX: Get conversationId from query params OR body (flexible)
+    const conversationId = req.query.conversationId || req.body.conversationId;
     const userId = req.userId;
     
     if (!conversationId) {
-      return res.status(400).json({ error: 'conversationId is required in request body' });
+      return res.status(400).json({ 
+        error: 'conversationId is required (as query parameter or in body)',
+        example: '/api/chat/messages/:id?conversationId=conv_123&deleteForEveryone=true'
+      });
     }
     
     // Get user info for relay
@@ -4369,7 +4375,7 @@ app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
     // Emit deletion to conversation participants
     io.to(`conversation_${conversationId}`).emit('message_deleted', deletionData);
     
-    console.log(`🗑️ HTTP message deletion relayed: ${messageId} (deleteForEveryone: ${deleteForEveryone})`);
+    console.log(`🗑️ Message deletion relayed: ${messageId} (deleteForEveryone: ${deleteForEveryone})`);
     
     res.json({ 
       success: true, 
