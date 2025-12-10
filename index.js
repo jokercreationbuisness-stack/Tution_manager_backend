@@ -4339,19 +4339,32 @@ app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (
 });
 
 // 🚀 UPDATED: Local-first message deletion (relay-only approach)
-// 🚀 TEMPORARY: Handle missing conversationId gracefully
+// 🚀 FIXED: Local-first message deletion WITH socket relay
 app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
   try {
     const messageId = req.params.id;
     const deleteForEveryone = req.query.deleteForEveryone === 'true';
-    
-    // 🚀 TEMP FIX: If conversationId is missing, just return success
-    const conversationId = req.query.conversationId || req.body.conversationId || 'unknown';
+    const conversationId = req.query.conversationId || req.body.conversationId;
     const userId = req.userId;
     
     console.log(`🗑️ Delete request: messageId=${messageId}, conversationId=${conversationId}, deleteForEveryone=${deleteForEveryone}`);
     
-    // For now, just return success - local deletion will handle it
+    // 🚀 CRITICAL: Emit socket event for real-time sync
+    if (deleteForEveryone && conversationId && conversationId !== 'unknown') {
+      const user = await User.findById(userId).select('name');
+      
+      io.to(`conversation_${conversationId}`).emit('message_deleted', {
+        messageId: messageId,
+        conversationId: conversationId,
+        deletedBy: userId,
+        deletedByName: user?.name || 'Unknown',
+        deleteForEveryone: true,
+        deletedAt: new Date().toISOString()
+      });
+      
+      console.log(`📡 Emitted message_deleted to conversation_${conversationId}`);
+    }
+    
     res.json({ 
       success: true, 
       message: deleteForEveryone ? 'Message deleted for everyone' : 'Message deleted for you'
