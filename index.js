@@ -4349,20 +4349,46 @@ app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
     
     console.log(`🗑️ Delete request: messageId=${messageId}, conversationId=${conversationId}, deleteForEveryone=${deleteForEveryone}`);
     
-    // 🚀 CRITICAL: Emit socket event for real-time sync
-    if (deleteForEveryone && conversationId && conversationId !== 'unknown') {
+    // 🚀 CRITICAL: Emit socket event for real-time sync to OTHER user
+    if (deleteForEveryone) {
       const user = await User.findById(userId).select('name');
       
-      io.to(`conversation_${conversationId}`).emit('message_deleted', {
+      const deletionData = {
         messageId: messageId,
-        conversationId: conversationId,
+        conversationId: conversationId || 'unknown',
         deletedBy: userId,
         deletedByName: user?.name || 'Unknown',
         deleteForEveryone: true,
         deletedAt: new Date().toISOString()
-      });
+      };
       
-      console.log(`📡 Emitted message_deleted to conversation_${conversationId}`);
+      // Emit to conversation room (both users will receive)
+      if (conversationId && conversationId !== 'unknown') {
+        io.to(`conversation_${conversationId}`).emit('message_deleted', deletionData);
+        console.log(`📡 Emitted message_deleted to conversation_${conversationId}`);
+      }
+      
+      // Also emit directly to the other user's room (in case they're not in conversation room)
+      // Find the conversation to get the other user ID
+      try {
+        const conversation = await Conversation.findOne({
+          $or: [
+            { teacherId: userId },
+            { studentId: userId }
+          ]
+        }).select('teacherId studentId');
+        
+        if (conversation) {
+          const otherUserId = conversation.teacherId.toString() === userId 
+            ? conversation.studentId.toString() 
+            : conversation.teacherId.toString();
+          
+          io.to(otherUserId).emit('message_deleted', deletionData);
+          console.log(`📡 Also emitted message_deleted directly to user ${otherUserId}`);
+        }
+      } catch (convError) {
+        console.log('Could not find conversation for direct emit:', convError.message);
+      }
     }
     
     res.json({ 
