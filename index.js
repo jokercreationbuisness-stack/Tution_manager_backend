@@ -1027,18 +1027,33 @@ socket.on('mark_all_read', async (data) => {
     
     if (!socket.userId) return;
     
-    // Relay deletion to all participants
-    io.to(`conversation_${conversationId}`).emit('message_deleted', {
-      messageId,
-      deletedBy: socket.userId,
-      deletedForEveryone: deleteForEveryone || false,
-      deletedAt: new Date().toISOString()
-    });
+    // Get sender info for proper authorization check
+    const sender = await User.findById(socket.userId).select('name');
     
-    console.log(`🗑️ Message deletion relayed: ${messageId}`);
+    // 🚀 Enhanced deletion relay with full context
+    const deletionData = {
+      messageId,
+      conversationId,
+      deletedBy: socket.userId,
+      deletedByName: sender.name,
+      deleteForEveryone: deleteForEveryone || false,
+      deletedAt: new Date().toISOString()
+    };
+    
+    // Relay deletion to all participants in conversation
+    io.to(`conversation_${conversationId}`).emit('message_deleted', deletionData);
+    
+    // Also emit to both users' personal rooms for offline handling
+    socket.emit('message_deletion_confirmed', { messageId, deleteForEveryone });
+    
+    console.log(`🗑️ Message deletion relayed: ${messageId} (deleteForEveryone: ${deleteForEveryone})`);
     
   } catch (error) {
     console.error('❌ Delete message error:', error);
+    socket.emit('message_deletion_failed', { 
+      messageId: data.messageId, 
+      error: 'Failed to delete message' 
+    });
   }
 });
 
@@ -4323,76 +4338,83 @@ app.post('/api/chat/upload-voice', authRequired, upload.single('voice'), async (
   }
 });
 
+// 🚀 UPDATED: Local-first message deletion (relay-only approach)
 app.delete('/api/chat/messages/:id', authRequired, async (req, res) => {
   try {
     const messageId = req.params.id;
-    const deleteForEveryone = req.query.deleteForEveryone === 'true';  // ✅ NEW - reading from query
+    const deleteForEveryone = req.query.deleteForEveryone === 'true';
+    const { conversationId } = req.body; // Required for socket relay
     const userId = req.userId;
     
-    const message = await Message.findById(messageId);
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found' });
+    if (!conversationId) {
+      return res.status(400).json({ error: 'conversationId is required in request body' });
     }
     
-    if (deleteForEveryone) {
-      if (message.senderId.toString() !== userId) {
-        return res.status(403).json({ error: 'You can only delete your own messages for everyone' });
-      }
-      
-      message.deleted = true;
-      message.deletedAt = new Date();
-      message.deletedBy = userId;
-      await message.save();
-      
-      io.to(`conversation_${message.conversationId}`).emit('message_deleted', {
-        messageId: messageId,
-        deletedForEveryone: true
-      });
-      
-      res.json({ success: true, message: 'Message deleted for everyone' });
-    } else {
-      if (!message.deletedForUsers) {
-        message.deletedForUsers = [];
-      }
-      
-      if (!message.deletedForUsers.includes(userId)) {
-        message.deletedForUsers.push(userId);
-        await message.save();
-      }
-      
-      res.json({ success: true, message: 'Message deleted' });
+    // Get user info for relay
+    const user = await User.findById(userId).select('name');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
+    
+    // 🚀 LOCAL-FIRST: Just relay deletion event, no MongoDB operations
+    const deletionData = {
+      messageId,
+      conversationId,
+      deletedBy: userId,
+      deletedByName: user.name,
+      deleteForEveryone: deleteForEveryone,
+      deletedAt: new Date().toISOString()
+    };
+    
+    // Emit deletion to conversation participants
+    io.to(`conversation_${conversationId}`).emit('message_deleted', deletionData);
+    
+    console.log(`🗑️ HTTP message deletion relayed: ${messageId} (deleteForEveryone: ${deleteForEveryone})`);
+    
+    res.json({ 
+      success: true, 
+      message: deleteForEveryone ? 'Message deleted for everyone' : 'Message deleted for you',
+      deletionData 
+    });
+    
   } catch (error) {
     console.error('Delete message error:', error);
     res.status(500).json({ error: 'Failed to delete message' });
   }
 });
 
-app.delete('/api/chat/conversations/:id/messages', authRequired, async (req, res) => {
+// 🚀 NEW: Batch message deletion for "Clear Chat" functionality
+app.post('/api/chat/conversations/:id/clear', authRequired, async (req, res) => {
   try {
     const conversationId = req.params.id;
+    const { deleteForEveryone = false } = req.body;
     const userId = req.userId;
     
-    const conversation = await Conversation.findById(conversationId);
-    if (!conversation) {
-      return res.status(404).json({ error: 'Conversation not found' });
-    }
+    const user = await User.findById(userId).select('name');
     
-    if (conversation.teacherId.toString() !== userId && conversation.studentId.toString() !== userId) {
-      return res.status(403).json({ error: 'Not authorized' });
-    }
+    const clearData = {
+      conversationId,
+      clearedBy: userId,
+      clearedByName: user.name,
+      deleteForEveryone: deleteForEveryone,
+      clearedAt: new Date().toISOString()
+    };
     
-    await Message.updateMany(
-      { conversationId: conversationId },
-      { $addToSet: { deletedForUsers: userId } }
-    );
+    // Relay clear event to all participants
+    io.to(`conversation_${conversationId}`).emit('conversation_cleared', clearData);
     
-    res.json({ success: true, message: 'All messages deleted' });
+    res.json({ 
+      success: true, 
+      message: deleteForEveryone ? 'Chat cleared for everyone' : 'Chat cleared for you' 
+    });
+    
   } catch (error) {
-    console.error('Delete all messages error:', error);
-    res.status(500).json({ error: 'Failed to delete messages' });
+    console.error('Clear conversation error:', error);
+    res.status(500).json({ error: 'Failed to clear conversation' });
   }
 });
+
+
 
 app.post('/api/chat/messages/:id/copy', authRequired, async (req, res) => {
   try {
@@ -4420,31 +4442,7 @@ app.post('/api/chat/messages/:id/copy', authRequired, async (req, res) => {
   }
 });
 
-app.patch('/api/chat/messages/:id/delete-for-me', authRequired, async (req, res) => {
-  try {
-    const messageId = req.params.id;
-    const userId = req.userId;
-    
-    const message = await Message.findById(messageId);
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
-    
-    if (!message.deletedForUsers) {
-      message.deletedForUsers = [];
-    }
-    
-    if (!message.deletedForUsers.includes(userId)) {
-      message.deletedForUsers.push(userId);
-      await message.save();
-    }
-    
-    res.json({ success: true, message: 'Message deleted for you' });
-  } catch (error) {
-    console.error('Delete message for me error:', error);
-    res.status(500).json({ error: 'Failed to delete message' });
-  }
-});
+
 
 // Delete conversation - FIXED VERSION
 app.delete('/api/chat/conversations/:id', authRequired, async (req, res) => {
