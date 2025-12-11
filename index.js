@@ -525,6 +525,92 @@ const WhiteboardData = mongoose.model('WhiteboardData', WhiteboardDataSchema);
 
 const PendingNotification = mongoose.model('PendingNotification', PendingNotificationSchema);
 
+// ========= ADMIN PANEL SCHEMAS =========
+
+// Admin User Schema
+const AdminUserSchema = new Schema({
+  email: { type: String, required: true, lowercase: true, unique: true },
+  passwordHash: { type: String, required: true },
+  name: { type: String, required: true, trim: true },
+  role: { 
+    type: String, 
+    enum: ['SUPER_ADMIN', 'ADMIN', 'MODERATOR', 'SUPPORT'], 
+    required: true 
+  },
+  permissions: [{
+    type: String,
+    enum: [
+      'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS', 'DELETE_USERS',
+      'VIEW_ANALYTICS', 'VIEW_REPORTS', 'EXPORT_DATA',
+      'MANAGE_SETTINGS', 'MANAGE_ADMINS', 'VIEW_LOGS',
+      'MODERATE_CONTENT', 'VIEW_SUPPORT'
+    ]
+  }],
+  avatar: { type: String },
+  isActive: { type: Boolean, default: true },
+  twoFactorEnabled: { type: Boolean, default: false },
+  twoFactorSecret: { type: String },
+  lastLogin: { type: Date },
+  lastLoginIP: { type: String },
+  failedLoginAttempts: { type: Number, default: 0 },
+  lockedUntil: { type: Date },
+  passwordChangedAt: { type: Date, default: Date.now },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+AdminUserSchema.index({ email: 1 });
+AdminUserSchema.index({ role: 1 });
+
+// Admin Session Schema (for security tracking)
+const AdminSessionSchema = new Schema({
+  adminId: { type: Types.ObjectId, ref: 'AdminUser', required: true },
+  token: { type: String, required: true, unique: true },
+  refreshToken: { type: String, unique: true },
+  deviceInfo: { type: String },
+  ipAddress: { type: String },
+  userAgent: { type: String },
+  isActive: { type: Boolean, default: true },
+  expiresAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+AdminSessionSchema.index({ adminId: 1 });
+AdminSessionSchema.index({ token: 1 });
+AdminSessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// Admin Audit Log Schema
+const AdminAuditLogSchema = new Schema({
+  adminId: { type: Types.ObjectId, ref: 'AdminUser', required: true },
+  adminEmail: { type: String, required: true },
+  action: { type: String, required: true },
+  resource: { type: String, required: true },
+  resourceId: { type: String },
+  details: { type: Schema.Types.Mixed },
+  ipAddress: { type: String },
+  userAgent: { type: String },
+  status: { type: String, enum: ['SUCCESS', 'FAILED'], default: 'SUCCESS' },
+  createdAt: { type: Date, default: Date.now }
+});
+AdminAuditLogSchema.index({ adminId: 1, createdAt: -1 });
+AdminAuditLogSchema.index({ action: 1 });
+AdminAuditLogSchema.index({ createdAt: -1 });
+
+// System Settings Schema
+const SystemSettingsSchema = new Schema({
+  key: { type: String, required: true, unique: true },
+  value: { type: Schema.Types.Mixed, required: true },
+  category: { type: String, default: 'general' },
+  description: { type: String },
+  updatedBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// ========= ADMIN MODELS =========
+const AdminUser = mongoose.model('AdminUser', AdminUserSchema);
+const AdminSession = mongoose.model('AdminSession', AdminSessionSchema);
+const AdminAuditLog = mongoose.model('AdminAuditLog', AdminAuditLogSchema);
+const SystemSettings = mongoose.model('SystemSettings', SystemSettingsSchema);
+
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -601,6 +687,61 @@ async function getBlockedUserIds(userId) {
   }
 }
 
+// ========= ADMIN HELPER FUNCTIONS =========
+
+const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || 'admin_super_secret_key_2024_secure';
+const ADMIN_TOKEN_EXPIRY = '8h';
+const ADMIN_REFRESH_TOKEN_EXPIRY = '7d';
+
+const getDefaultPermissions = (role) => {
+  switch (role) {
+    case 'SUPER_ADMIN':
+      return [
+        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS', 'DELETE_USERS',
+        'VIEW_ANALYTICS', 'VIEW_REPORTS', 'EXPORT_DATA',
+        'MANAGE_SETTINGS', 'MANAGE_ADMINS', 'VIEW_LOGS',
+        'MODERATE_CONTENT', 'VIEW_SUPPORT'
+      ];
+    case 'ADMIN':
+      return [
+        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS',
+        'VIEW_ANALYTICS', 'VIEW_REPORTS', 'EXPORT_DATA',
+        'VIEW_LOGS', 'MODERATE_CONTENT', 'VIEW_SUPPORT'
+      ];
+    case 'MODERATOR':
+      return [
+        'VIEW_DASHBOARD', 'VIEW_USERS',
+        'MODERATE_CONTENT', 'VIEW_SUPPORT'
+      ];
+    case 'SUPPORT':
+      return ['VIEW_DASHBOARD', 'VIEW_USERS', 'VIEW_SUPPORT'];
+    default:
+      return [];
+  }
+};
+
+const logAdminAction = async (adminId, adminEmail, action, resource, resourceId, details, req, status = 'SUCCESS') => {
+  try {
+    await AdminAuditLog.create({
+      adminId,
+      adminEmail,
+      action,
+      resource,
+      resourceId,
+      details,
+      ipAddress: req.ip || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      status
+    });
+  } catch (error) {
+    console.error('Audit log error:', error);
+  }
+};
+
+const generateSecureToken = () => {
+  return require('crypto').randomBytes(64).toString('hex');
+};
+
 // ========= WEBRTC HELPER FUNCTION =========
 async function checkCallAuthorization(callerId, receiverId) {
   try {
@@ -671,6 +812,76 @@ const authRequired = (req, res, next) => {
 const requireRole = (role) => (req, res, next) => {
   if (req.role !== role) {
     return res.status(403).json({ error: `Access denied. Requires ${role} role.` });
+  }
+  next();
+};
+
+// ========= ADMIN AUTH MIDDLEWARE =========
+
+const adminAuthRequired = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Admin authentication required' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    
+    // Verify JWT
+    const decoded = jwt.verify(token, ADMIN_JWT_SECRET);
+    
+    // Check session exists and is active
+    const session = await AdminSession.findOne({ 
+      token, 
+      adminId: decoded.sub,
+      isActive: true,
+      expiresAt: { $gt: new Date() }
+    });
+    
+    if (!session) {
+      return res.status(401).json({ error: 'Session expired or invalid' });
+    }
+    
+    // Get admin user
+    const admin = await AdminUser.findById(decoded.sub);
+    if (!admin || !admin.isActive) {
+      return res.status(401).json({ error: 'Admin account is deactivated' });
+    }
+    
+    // Check if account is locked
+    if (admin.lockedUntil && new Date() < admin.lockedUntil) {
+      return res.status(423).json({ 
+        error: 'Account is locked',
+        lockedUntil: admin.lockedUntil
+      });
+    }
+    
+    req.adminId = decoded.sub;
+    req.adminRole = admin.role;
+    req.adminEmail = admin.email;
+    req.adminPermissions = admin.permissions;
+    req.sessionId = session._id;
+    
+    next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired' });
+    }
+    return res.status(401).json({ error: 'Invalid admin token' });
+  }
+};
+
+const requireAdminPermission = (permission) => (req, res, next) => {
+  if (!req.adminPermissions.includes(permission)) {
+    logAdminAction(req.adminId, req.adminEmail, `PERMISSION_DENIED:${permission}`, 'SECURITY', null, {}, req, 'FAILED');
+    return res.status(403).json({ error: `Permission denied: ${permission}` });
+  }
+  next();
+};
+
+const requireAdminRole = (roles) => (req, res, next) => {
+  if (!roles.includes(req.adminRole)) {
+    return res.status(403).json({ error: `Role required: ${roles.join(' or ')}` });
   }
   next();
 };
@@ -5725,6 +5936,974 @@ app.use('*', (req, res) => {
     path: req.originalUrl,
     method: req.method
   });
+});
+
+// ========= ADMIN PANEL API ENDPOINTS =========
+
+// Rate limiting for admin routes (stricter)
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  message: { error: 'Too many admin requests' },
+  trustProxy: 1
+});
+app.use('/api/admin/', adminLimiter);
+
+// ========= ADMIN AUTH =========
+
+// Admin Login
+app.post('/api/admin/auth/login', async (req, res) => {
+  try {
+    const { email, password, deviceInfo } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    const admin = await AdminUser.findOne({ email: email.toLowerCase() });
+    
+    if (!admin) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Check if locked
+    if (admin.lockedUntil && new Date() < admin.lockedUntil) {
+      const remainingMinutes = Math.ceil((admin.lockedUntil - new Date()) / 60000);
+      return res.status(423).json({ 
+        error: `Account locked. Try again in ${remainingMinutes} minutes.`
+      });
+    }
+    
+    // Verify password
+    const isValid = await bcrypt.compare(password, admin.passwordHash);
+    
+    if (!isValid) {
+      // Increment failed attempts
+      admin.failedLoginAttempts += 1;
+      
+      // Lock after 5 failed attempts
+      if (admin.failedLoginAttempts >= 5) {
+        admin.lockedUntil = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+        admin.failedLoginAttempts = 0;
+      }
+      
+      await admin.save();
+      
+      await logAdminAction(admin._id, admin.email, 'LOGIN_FAILED', 'AUTH', null, 
+        { reason: 'Invalid password', attempts: admin.failedLoginAttempts }, 
+        req, 'FAILED'
+      );
+      
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Reset failed attempts
+    admin.failedLoginAttempts = 0;
+    admin.lockedUntil = null;
+    admin.lastLogin = new Date();
+    admin.lastLoginIP = req.ip || req.connection.remoteAddress;
+    await admin.save();
+    
+    // Generate tokens
+    const accessToken = jwt.sign(
+      { sub: admin._id, email: admin.email, role: admin.role },
+      ADMIN_JWT_SECRET,
+      { expiresIn: ADMIN_TOKEN_EXPIRY }
+    );
+    
+    const refreshToken = generateSecureToken();
+    
+    // Create session
+    await AdminSession.create({
+      adminId: admin._id,
+      token: accessToken,
+      refreshToken,
+      deviceInfo: deviceInfo || 'Unknown',
+      ipAddress: req.ip || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000) // 8 hours
+    });
+    
+    await logAdminAction(admin._id, admin.email, 'LOGIN_SUCCESS', 'AUTH', null, 
+      { deviceInfo }, req
+    );
+    
+    res.json({
+      success: true,
+      accessToken,
+      refreshToken,
+      expiresIn: 8 * 60 * 60, // seconds
+      admin: {
+        id: admin._id.toString(),
+        email: admin.email,
+        name: admin.name,
+        role: admin.role,
+        permissions: admin.permissions,
+        avatar: admin.avatar
+      }
+    });
+    
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// Refresh Token
+app.post('/api/admin/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'Refresh token required' });
+    }
+    
+    const session = await AdminSession.findOne({ refreshToken, isActive: true });
+    if (!session) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+    
+    const admin = await AdminUser.findById(session.adminId);
+    if (!admin || !admin.isActive) {
+      return res.status(401).json({ error: 'Account deactivated' });
+    }
+    
+    // Generate new tokens
+    const newAccessToken = jwt.sign(
+      { sub: admin._id, email: admin.email, role: admin.role },
+      ADMIN_JWT_SECRET,
+      { expiresIn: ADMIN_TOKEN_EXPIRY }
+    );
+    
+    const newRefreshToken = generateSecureToken();
+    
+    // Update session
+    session.token = newAccessToken;
+    session.refreshToken = newRefreshToken;
+    session.expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000);
+    await session.save();
+    
+    res.json({
+      success: true,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      expiresIn: 8 * 60 * 60
+    });
+    
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    res.status(500).json({ error: 'Token refresh failed' });
+  }
+});
+
+// Logout
+app.post('/api/admin/auth/logout', adminAuthRequired, async (req, res) => {
+  try {
+    await AdminSession.findByIdAndUpdate(req.sessionId, { isActive: false });
+    await logAdminAction(req.adminId, req.adminEmail, 'LOGOUT', 'AUTH', null, {}, req);
+    res.json({ success: true, message: 'Logged out successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Logout failed' });
+  }
+});
+
+// Logout All Sessions
+app.post('/api/admin/auth/logout-all', adminAuthRequired, async (req, res) => {
+  try {
+    await AdminSession.updateMany({ adminId: req.adminId }, { isActive: false });
+    await logAdminAction(req.adminId, req.adminEmail, 'LOGOUT_ALL_SESSIONS', 'AUTH', null, {}, req);
+    res.json({ success: true, message: 'All sessions terminated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to logout all sessions' });
+  }
+});
+
+// Get Current Admin
+app.get('/api/admin/auth/me', adminAuthRequired, async (req, res) => {
+  try {
+    const admin = await AdminUser.findById(req.adminId)
+      .select('-passwordHash -twoFactorSecret');
+    
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    res.json({
+      success: true,
+      admin: {
+        id: admin._id.toString(),
+        email: admin.email,
+        name: admin.name,
+        role: admin.role,
+        permissions: admin.permissions,
+        avatar: admin.avatar,
+        twoFactorEnabled: admin.twoFactorEnabled,
+        lastLogin: admin.lastLogin,
+        createdAt: admin.createdAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch admin profile' });
+  }
+});
+
+// Change Password
+app.post('/api/admin/auth/change-password', adminAuthRequired, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Both passwords required' });
+    }
+    
+    if (newPassword.length < 12) {
+      return res.status(400).json({ error: 'Password must be at least 12 characters' });
+    }
+    
+    const admin = await AdminUser.findById(req.adminId);
+    const isValid = await bcrypt.compare(currentPassword, admin.passwordHash);
+    
+    if (!isValid) {
+      await logAdminAction(req.adminId, req.adminEmail, 'PASSWORD_CHANGE_FAILED', 'AUTH', null, 
+        { reason: 'Invalid current password' }, req, 'FAILED'
+      );
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    admin.passwordHash = await bcrypt.hash(newPassword, 12);
+    admin.passwordChangedAt = new Date();
+    await admin.save();
+    
+    // Invalidate all other sessions
+    await AdminSession.updateMany(
+      { adminId: req.adminId, _id: { $ne: req.sessionId } },
+      { isActive: false }
+    );
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'PASSWORD_CHANGED', 'AUTH', null, {}, req);
+    
+    res.json({ success: true, message: 'Password changed successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
+// ========= DASHBOARD =========
+
+app.get('/api/admin/dashboard/stats', adminAuthRequired, requireAdminPermission('VIEW_DASHBOARD'), async (req, res) => {
+  try {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const thisWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const thisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    // User stats
+    const totalUsers = await User.countDocuments();
+    const activeUsers = await User.countDocuments({ isActive: true });
+    const teacherCount = await User.countDocuments({ role: 'TEACHER' });
+    const studentCount = await User.countDocuments({ role: 'STUDENT' });
+    const newUsersToday = await User.countDocuments({ createdAt: { $gte: today } });
+    const newUsersThisWeek = await User.countDocuments({ createdAt: { $gte: thisWeek } });
+    const newUsersThisMonth = await User.countDocuments({ createdAt: { $gte: thisMonth } });
+    const onlineUsers = await User.countDocuments({ isOnline: true });
+    
+    // Content stats
+    const totalClasses = await ClassModel.countDocuments();
+    const totalAssignments = await Assignment.countDocuments();
+    const totalExams = await Exam.countDocuments();
+    const totalNotes = await Note.countDocuments();
+    const totalGroupClasses = await GroupClass.countDocuments();
+    const liveGroupClasses = await GroupClass.countDocuments({ status: 'LIVE' });
+    
+    // Engagement stats
+    const totalLinks = await TeacherStudentLink.countDocuments({ isActive: true });
+    const totalGameScores = await GameScore.countDocuments();
+    const gamesPlayedToday = await GameScore.countDocuments({ playedAt: { $gte: today } });
+    
+    // Subscription stats
+    const freeUsers = await User.countDocuments({ subscriptionStatus: 'free' });
+    const trialUsers = await User.countDocuments({ subscriptionStatus: 'trial' });
+    const activeSubscriptions = await User.countDocuments({ subscriptionStatus: 'active' });
+    const expiredSubscriptions = await User.countDocuments({ subscriptionStatus: 'expired' });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'VIEW_DASHBOARD', 'DASHBOARD', null, {}, req);
+    
+    res.json({
+      success: true,
+      stats: {
+        users: {
+          total: totalUsers,
+          active: activeUsers,
+          teachers: teacherCount,
+          students: studentCount,
+          online: onlineUsers,
+          newToday: newUsersToday,
+          newThisWeek: newUsersThisWeek,
+          newThisMonth: newUsersThisMonth
+        },
+        content: {
+          classes: totalClasses,
+          assignments: totalAssignments,
+          exams: totalExams,
+          notes: totalNotes,
+          groupClasses: totalGroupClasses,
+          liveClasses: liveGroupClasses
+        },
+        engagement: {
+          teacherStudentLinks: totalLinks,
+          totalGamesPlayed: totalGameScores,
+          gamesPlayedToday: gamesPlayedToday
+        },
+        subscriptions: {
+          free: freeUsers,
+          trial: trialUsers,
+          active: activeSubscriptions,
+          expired: expiredSubscriptions
+        }
+      },
+      generatedAt: new Date()
+    });
+  } catch (error) {
+    console.error('Dashboard stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch dashboard stats' });
+  }
+});
+
+// User Growth Chart Data
+app.get('/api/admin/dashboard/user-growth', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const { period = '30d' } = req.query;
+    
+    let days = 30;
+    if (period === '7d') days = 7;
+    else if (period === '90d') days = 90;
+    else if (period === '365d') days = 365;
+    
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days);
+    
+    const pipeline = [
+      { $match: { createdAt: { $gte: startDate } } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' }
+          },
+          count: { $sum: 1 },
+          teachers: { $sum: { $cond: [{ $eq: ['$role', 'TEACHER'] }, 1, 0] } },
+          students: { $sum: { $cond: [{ $eq: ['$role', 'STUDENT'] }, 1, 0] } }
+        }
+      },
+      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
+    ];
+    
+    const data = await User.aggregate(pipeline);
+    
+    const formatted = data.map(d => ({
+      date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
+      total: d.count,
+      teachers: d.teachers,
+      students: d.students
+    }));
+    
+    res.json({ success: true, data: formatted });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch user growth data' });
+  }
+});
+
+// ========= USER MANAGEMENT =========
+
+// List Users (with pagination, search, filters)
+app.get('/api/admin/users', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { 
+      page = 1, 
+      limit = 20, 
+      search, 
+      role, 
+      status,
+      sortBy = 'createdAt',
+      sortOrder = 'desc'
+    } = req.query;
+    
+    const query = {};
+    
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { studentCode: { $regex: search, $options: 'i' } }
+      ];
+    }
+    
+    if (role) query.role = role;
+    if (status === 'active') query.isActive = true;
+    if (status === 'inactive') query.isActive = false;
+    if (status === 'online') query.isOnline = true;
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .select('-passwordHash')
+        .sort(sortOptions)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      User.countDocuments(query)
+    ]);
+    
+    const formatted = users.map(u => ({
+      id: u._id.toString(),
+      name: u.name,
+      email: u.email,
+      mobile: u.mobile,
+      role: u.role,
+      studentCode: u.studentCode,
+      avatar: u.avatar,
+      isActive: u.isActive,
+      isOnline: u.isOnline,
+      lastSeen: u.lastSeen,
+      lastLogin: u.lastLogin,
+      subscriptionStatus: u.subscriptionStatus,
+      subscriptionExpiry: u.subscriptionExpiry,
+      totalGameXP: u.totalGameXP,
+      gamesPlayed: u.gamesPlayed,
+      createdAt: u.createdAt
+    }));
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'LIST_USERS', 'USERS', null, 
+      { page, limit, search, role, status }, req
+    );
+    
+    res.json({
+      success: true,
+      users: formatted,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    console.error('List users error:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Get Single User Details
+app.get('/api/admin/users/:id', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('-passwordHash').lean();
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Get additional stats based on role
+    let stats = {};
+    
+    if (user.role === 'TEACHER') {
+      const [studentCount, classCount, assignmentCount, examCount] = await Promise.all([
+        TeacherStudentLink.countDocuments({ teacherId: user._id, isActive: true }),
+        ClassModel.countDocuments({ teacherId: user._id }),
+        Assignment.countDocuments({ teacherId: user._id }),
+        Exam.countDocuments({ teacherId: user._id })
+      ]);
+      
+      stats = { studentCount, classCount, assignmentCount, examCount };
+    } else {
+      const [teacherCount, resultCount, attendanceCount] = await Promise.all([
+        TeacherStudentLink.countDocuments({ studentId: user._id, isActive: true }),
+        Result.countDocuments({ studentId: user._id }),
+        Attendance.countDocuments({ 'marks.studentId': user._id })
+      ]);
+      
+      stats = { teacherCount, resultCount, attendanceCount };
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'VIEW_USER', 'USERS', req.params.id, 
+      { email: user.email }, req
+    );
+    
+    res.json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        role: user.role,
+        studentCode: user.studentCode,
+        avatar: user.avatar,
+        isActive: user.isActive,
+        isOnline: user.isOnline,
+        lastSeen: user.lastSeen,
+        lastLogin: user.lastLogin,
+        subscriptionStatus: user.subscriptionStatus,
+        subscriptionExpiry: user.subscriptionExpiry,
+        totalGameXP: user.totalGameXP,
+        gamesPlayed: user.gamesPlayed,
+        createdAt: user.createdAt,
+        stats
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch user details' });
+  }
+});
+
+// Update User
+app.put('/api/admin/users/:id', adminAuthRequired, requireAdminPermission('EDIT_USERS'), async (req, res) => {
+  try {
+    const { name, email, mobile, isActive, subscriptionStatus, subscriptionExpiry } = req.body;
+    
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const changes = {};
+    
+    if (name && name !== user.name) {
+      changes.name = { from: user.name, to: name };
+      user.name = name;
+    }
+    if (email && email !== user.email) {
+      changes.email = { from: user.email, to: email };
+      user.email = email.toLowerCase();
+    }
+    if (mobile !== undefined) {
+      changes.mobile = { from: user.mobile, to: mobile };
+      user.mobile = mobile;
+    }
+    if (isActive !== undefined && isActive !== user.isActive) {
+      changes.isActive = { from: user.isActive, to: isActive };
+      user.isActive = isActive;
+    }
+    if (subscriptionStatus) {
+      changes.subscriptionStatus = { from: user.subscriptionStatus, to: subscriptionStatus };
+      user.subscriptionStatus = subscriptionStatus;
+    }
+    if (subscriptionExpiry) {
+      changes.subscriptionExpiry = { from: user.subscriptionExpiry, to: subscriptionExpiry };
+      user.subscriptionExpiry = new Date(subscriptionExpiry);
+    }
+    
+    await user.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_USER', 'USERS', req.params.id, 
+      { changes }, req
+    );
+    
+    res.json({ success: true, message: 'User updated successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update user' });
+  }
+});
+
+// Deactivate User
+app.post('/api/admin/users/:id/deactivate', adminAuthRequired, requireAdminPermission('EDIT_USERS'), async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isActive: false, isOnline: false },
+      { new: true }
+    );
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'DEACTIVATE_USER', 'USERS', req.params.id, 
+      { email: user.email }, req
+    );
+    
+    res.json({ success: true, message: 'User deactivated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to deactivate user' });
+  }
+});
+
+// Activate User
+app.post('/api/admin/users/:id/activate', adminAuthRequired, requireAdminPermission('EDIT_USERS'), async (req, res) => {
+  try {
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { isActive: true },
+      { new: true }
+    );
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'ACTIVATE_USER', 'USERS', req.params.id, 
+      { email: user.email }, req
+    );
+    
+    res.json({ success: true, message: 'User activated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to activate user' });
+  }
+});
+
+// Reset User Password
+app.post('/api/admin/users/:id/reset-password', adminAuthRequired, requireAdminPermission('EDIT_USERS'), async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+    
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    user.passwordHash = await bcrypt.hash(newPassword, 12);
+    await user.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'RESET_USER_PASSWORD', 'USERS', req.params.id, 
+      { email: user.email }, req
+    );
+    
+    res.json({ success: true, message: 'Password reset successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ========= ADMIN MANAGEMENT =========
+
+// List Admins
+app.get('/api/admin/admins', adminAuthRequired, requireAdminRole(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const admins = await AdminUser.find()
+      .select('-passwordHash -twoFactorSecret')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    const formatted = admins.map(a => ({
+      id: a._id.toString(),
+      email: a.email,
+      name: a.name,
+      role: a.role,
+      permissions: a.permissions,
+      avatar: a.avatar,
+      isActive: a.isActive,
+      twoFactorEnabled: a.twoFactorEnabled,
+      lastLogin: a.lastLogin,
+      createdAt: a.createdAt
+    }));
+    
+    res.json({ success: true, admins: formatted });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch admins' });
+  }
+});
+
+// Create Admin
+app.post('/api/admin/admins', adminAuthRequired, requireAdminRole(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const { email, password, name, role } = req.body;
+    
+    if (!email || !password || !name || !role) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+    
+    if (password.length < 12) {
+      return res.status(400).json({ error: 'Password must be at least 12 characters' });
+    }
+    
+    const existing = await AdminUser.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(409).json({ error: 'Admin with this email already exists' });
+    }
+    
+    const passwordHash = await bcrypt.hash(password, 12);
+    const permissions = getDefaultPermissions(role);
+    
+    const admin = await AdminUser.create({
+      email: email.toLowerCase(),
+      passwordHash,
+      name,
+      role,
+      permissions,
+      createdBy: req.adminId
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'CREATE_ADMIN', 'ADMINS', admin._id.toString(), 
+      { email: admin.email, role: admin.role }, req
+    );
+    
+    res.status(201).json({ 
+      success: true, 
+      adminId: admin._id.toString(),
+      message: 'Admin created successfully'
+    });
+  } catch (error) {
+    console.error('Create admin error:', error);
+    res.status(500).json({ error: 'Failed to create admin' });
+  }
+});
+
+// Update Admin
+app.put('/api/admin/admins/:id', adminAuthRequired, requireAdminRole(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const { name, role, permissions, isActive } = req.body;
+    
+    const admin = await AdminUser.findById(req.params.id);
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    // Prevent editing yourself
+    if (admin._id.toString() === req.adminId) {
+      return res.status(400).json({ error: 'Cannot edit your own account here' });
+    }
+    
+    if (name) admin.name = name;
+    if (role) {
+      admin.role = role;
+      admin.permissions = permissions || getDefaultPermissions(role);
+    }
+    if (isActive !== undefined) admin.isActive = isActive;
+    admin.updatedAt = new Date();
+    
+    await admin.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_ADMIN', 'ADMINS', req.params.id, 
+      { email: admin.email, changes: { name, role, isActive } }, req
+    );
+    
+    res.json({ success: true, message: 'Admin updated successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update admin' });
+  }
+});
+
+// Delete Admin
+app.delete('/api/admin/admins/:id', adminAuthRequired, requireAdminRole(['SUPER_ADMIN']), async (req, res) => {
+  try {
+    const admin = await AdminUser.findById(req.params.id);
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    if (admin._id.toString() === req.adminId) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    
+    await AdminSession.deleteMany({ adminId: admin._id });
+    await AdminUser.findByIdAndDelete(req.params.id);
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'DELETE_ADMIN', 'ADMINS', req.params.id, 
+      { email: admin.email }, req
+    );
+    
+    res.json({ success: true, message: 'Admin deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete admin' });
+  }
+});
+
+// ========= AUDIT LOGS =========
+
+app.get('/api/admin/audit-logs', adminAuthRequired, requireAdminPermission('VIEW_LOGS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 50, adminId, action, resource, startDate, endDate } = req.query;
+    
+    const query = {};
+    if (adminId) query.adminId = adminId;
+    if (action) query.action = { $regex: action, $options: 'i' };
+    if (resource) query.resource = resource;
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [logs, total] = await Promise.all([
+      AdminAuditLog.find(query)
+        .populate('adminId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      AdminAuditLog.countDocuments(query)
+    ]);
+    
+    const formatted = logs.map(log => ({
+      id: log._id.toString(),
+      admin: log.adminId ? { id: log.adminId._id.toString(), name: log.adminId.name, email: log.adminId.email } : null,
+      adminEmail: log.adminEmail,
+      action: log.action,
+      resource: log.resource,
+      resourceId: log.resourceId,
+      details: log.details,
+      ipAddress: log.ipAddress,
+      userAgent: log.userAgent,
+      status: log.status,
+      createdAt: log.createdAt
+    }));
+    
+    res.json({
+      success: true,
+      logs: formatted,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / parseInt(limit))
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch audit logs' });
+  }
+});
+
+// ========= REPORTS =========
+
+app.get('/api/admin/reports/users', adminAuthRequired, requireAdminPermission('VIEW_REPORTS'), async (req, res) => {
+  try {
+    const { format = 'json', startDate, endDate } = req.query;
+    
+    const query = {};
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) query.createdAt.$gte = new Date(startDate);
+      if (endDate) query.createdAt.$lte = new Date(endDate);
+    }
+    
+    const users = await User.find(query)
+      .select('name email role studentCode isActive subscriptionStatus createdAt lastLogin')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'GENERATE_USER_REPORT', 'REPORTS', null, 
+      { count: users.length, format }, req
+    );
+    
+    if (format === 'csv') {
+      const csv = [
+        'Name,Email,Role,Student Code,Active,Subscription,Created At,Last Login',
+        ...users.map(u => `${u.name},${u.email},${u.role},${u.studentCode || ''},${u.isActive},${u.subscriptionStatus},${u.createdAt},${u.lastLogin || ''}`)
+      ].join('\n');
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename=users_report.csv');
+      return res.send(csv);
+    }
+    
+    res.json({ success: true, users, count: users.length });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to generate report' });
+  }
+});
+
+// ========= SYSTEM SETTINGS =========
+
+app.get('/api/admin/settings', adminAuthRequired, requireAdminPermission('MANAGE_SETTINGS'), async (req, res) => {
+  try {
+    const settings = await SystemSettings.find().lean();
+    
+    const formatted = {};
+    settings.forEach(s => {
+      if (!formatted[s.category]) formatted[s.category] = {};
+      formatted[s.category][s.key] = {
+        value: s.value,
+        description: s.description,
+        updatedAt: s.updatedAt
+      };
+    });
+    
+    res.json({ success: true, settings: formatted });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+app.put('/api/admin/settings/:key', adminAuthRequired, requireAdminPermission('MANAGE_SETTINGS'), async (req, res) => {
+  try {
+    const { value, category, description } = req.body;
+    
+    const setting = await SystemSettings.findOneAndUpdate(
+      { key: req.params.key },
+      { 
+        value, 
+        category: category || 'general',
+        description,
+        updatedBy: req.adminId,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_SETTING', 'SETTINGS', req.params.key, 
+      { value }, req
+    );
+    
+    res.json({ success: true, setting });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update setting' });
+  }
+});
+
+// ========= CREATE INITIAL SUPER ADMIN (ONE-TIME SETUP) =========
+app.post('/api/admin/setup/initial', async (req, res) => {
+  try {
+    // Check if any admin exists
+    const existingAdmin = await AdminUser.findOne();
+    if (existingAdmin) {
+      return res.status(400).json({ error: 'Setup already completed' });
+    }
+    
+    const { email, password, name, setupKey } = req.body;
+    
+    // Require setup key for security
+    if (setupKey !== process.env.ADMIN_SETUP_KEY && setupKey !== 'alarmind_admin_setup_2024') {
+      return res.status(403).json({ error: 'Invalid setup key' });
+    }
+    
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+    
+    if (password.length < 12) {
+      return res.status(400).json({ error: 'Password must be at least 12 characters' });
+    }
+    
+    const passwordHash = await bcrypt.hash(password, 12);
+    
+    const admin = await AdminUser.create({
+      email: email.toLowerCase(),
+      passwordHash,
+      name,
+      role: 'SUPER_ADMIN',
+      permissions: getDefaultPermissions('SUPER_ADMIN')
+    });
+    
+    console.log(`🔐 Initial super admin created: ${email}`);
+    
+    res.status(201).json({ 
+      success: true, 
+      message: 'Super admin created successfully',
+      adminId: admin._id.toString()
+    });
+  } catch (error) {
+    console.error('Initial setup error:', error);
+    res.status(500).json({ error: 'Setup failed' });
+  }
 });
 
 // ========= ERROR HANDLER =========
