@@ -7436,7 +7436,7 @@ app.get('/api/admin/security/logs', adminAuthRequired, requireAdminPermission('V
 });
 
 // 2FA Settings (placeholder)
-app.get('/api/admin/security/2fa', adminAuthRequired, requireAdminPermission('MANAGE_SECURITY'), async (req, res) => {
+app.get('/api/admin/security/2fa', adminAuthRequired, async (req, res) => {
   try {
     const admin = await AdminUser.findById(req.adminId).select('twoFactorEnabled');
     res.json({
