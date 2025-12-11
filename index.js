@@ -605,11 +605,240 @@ const SystemSettingsSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+
 // ========= ADMIN MODELS =========
 const AdminUser = mongoose.model('AdminUser', AdminUserSchema);
 const AdminSession = mongoose.model('AdminSession', AdminSessionSchema);
 const AdminAuditLog = mongoose.model('AdminAuditLog', AdminAuditLogSchema);
 const SystemSettings = mongoose.model('SystemSettings', SystemSettingsSchema);
+
+// ========================================
+// ========= ENTERPRISE ADMIN SCHEMAS =========
+// ========================================
+
+// Push Notification Schema
+const PushNotificationSchema = new Schema({
+  title: { type: String, required: true },
+  body: { type: String, required: true },
+  imageUrl: { type: String },
+  type: { type: String, enum: ['text', 'image', 'popup', 'in_app'], default: 'text' },
+  targetType: { type: String, enum: ['all', 'teachers', 'students', 'specific'], required: true },
+  targetUserIds: [{ type: Types.ObjectId, ref: 'User' }],
+  data: { type: Schema.Types.Mixed },
+  popupSettings: {
+    dismissable: { type: Boolean, default: true },
+    actionType: { type: String, enum: ['none', 'url', 'screen'], default: 'none' },
+    actionUrl: { type: String }
+  },
+  scheduledAt: { type: Date },
+  sentAt: { type: Date },
+  status: { type: String, enum: ['draft', 'scheduled', 'sent', 'failed'], default: 'draft' },
+  sentCount: { type: Number, default: 0 },
+  deliveredCount: { type: Number, default: 0 },
+  openedCount: { type: Number, default: 0 },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now }
+});
+PushNotificationSchema.index({ status: 1, scheduledAt: 1 });
+
+// Support Ticket Schema
+const SupportTicketSchema = new Schema({
+  ticketNumber: { type: String, unique: true },
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  subject: { type: String, required: true },
+  status: { type: String, enum: ['open', 'in_progress', 'resolved', 'closed'], default: 'open' },
+  priority: { type: String, enum: ['low', 'medium', 'high', 'urgent'], default: 'medium' },
+  assignedTo: { type: Types.ObjectId, ref: 'AdminUser' },
+  lastMessageAt: { type: Date, default: Date.now },
+  unreadAdminCount: { type: Number, default: 0 },
+  unreadUserCount: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+SupportTicketSchema.index({ status: 1, priority: 1 });
+
+// Support Message Schema
+const SupportMessageSchema = new Schema({
+  ticketId: { type: Types.ObjectId, ref: 'SupportTicket', required: true },
+  senderId: { type: String, required: true },
+  senderType: { type: String, enum: ['user', 'admin'], required: true },
+  senderName: { type: String, required: true },
+  content: { type: String, required: true },
+  attachmentUrl: { type: String },
+  attachmentType: { type: String },
+  isRead: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+SupportMessageSchema.index({ ticketId: 1, createdAt: 1 });
+
+// Legal Document Schema
+const LegalDocumentSchema = new Schema({
+  type: { type: String, enum: ['privacy_policy', 'terms_conditions', 'refund_policy', 'cookie_policy', 'gdpr'], required: true, unique: true },
+  title: { type: String, required: true },
+  content: { type: String, required: true },
+  version: { type: String, required: true },
+  isPublished: { type: Boolean, default: false },
+  publishedAt: { type: Date },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// Legal Document Version History
+const LegalDocumentVersionSchema = new Schema({
+  documentType: { type: String, required: true },
+  version: { type: String, required: true },
+  content: { type: String, required: true },
+  changeLog: { type: String },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Feature Flag Schema
+const FeatureFlagSchema = new Schema({
+  key: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  description: { type: String },
+  isEnabled: { type: Boolean, default: false },
+  targetAudience: { type: String, enum: ['all', 'teachers', 'students', 'percentage'], default: 'all' },
+  rolloutPercentage: { type: Number, min: 0, max: 100 },
+  category: { type: String, default: 'General' },
+  updatedBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  updatedAt: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// App Configuration Schema
+const AppConfigSchema = new Schema({
+  key: { type: String, required: true, unique: true },
+  value: { type: Schema.Types.Mixed, required: true },
+  type: { type: String, enum: ['string', 'number', 'boolean', 'json'], default: 'string' },
+  category: { type: String, default: 'General' },
+  description: { type: String },
+  isSecret: { type: Boolean, default: false },
+  updatedBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// User Block/Ban Schema (Enhanced)
+const UserBanSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  reason: { type: String, required: true },
+  banType: { type: String, enum: ['temporary', 'permanent'], default: 'temporary' },
+  bannedUntil: { type: Date },
+  bannedBy: { type: Types.ObjectId, ref: 'AdminUser', required: true },
+  unbannedBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  unbannedAt: { type: Date },
+  isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now }
+});
+UserBanSchema.index({ userId: 1, isActive: 1 });
+
+// User Session Tracking Schema
+const UserSessionSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  deviceType: { type: String },
+  deviceName: { type: String },
+  ipAddress: { type: String },
+  location: { type: String },
+  userAgent: { type: String },
+  isActive: { type: Boolean, default: true },
+  lastActivity: { type: Date, default: Date.now },
+  createdAt: { type: Date, default: Date.now }
+});
+UserSessionSchema.index({ userId: 1, isActive: 1 });
+
+// Subscription Plan Schema
+const SubscriptionPlanSchema = new Schema({
+  name: { type: String, required: true },
+  description: { type: String },
+  price: { type: Number, required: true },
+  currency: { type: String, default: 'INR' },
+  duration: { type: String, enum: ['monthly', 'yearly', 'lifetime'], required: true },
+  features: [{ type: String }],
+  isActive: { type: Boolean, default: true },
+  subscriberCount: { type: Number, default: 0 },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+// User Subscription Schema
+const UserSubscriptionSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  planId: { type: Types.ObjectId, ref: 'SubscriptionPlan', required: true },
+  status: { type: String, enum: ['active', 'expired', 'cancelled', 'pending'], default: 'pending' },
+  startDate: { type: Date, required: true },
+  endDate: { type: Date, required: true },
+  amount: { type: Number, required: true },
+  paymentMethod: { type: String },
+  transactionId: { type: String },
+  createdAt: { type: Date, default: Date.now }
+});
+UserSubscriptionSchema.index({ userId: 1, status: 1 });
+
+// Transaction Schema
+const TransactionSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  type: { type: String, enum: ['subscription', 'refund', 'credit'], required: true },
+  amount: { type: Number, required: true },
+  currency: { type: String, default: 'INR' },
+  status: { type: String, enum: ['completed', 'pending', 'failed', 'refunded'], default: 'pending' },
+  paymentMethod: { type: String },
+  paymentGatewayId: { type: String },
+  orderId: { type: String },
+  subscriptionId: { type: Types.ObjectId, ref: 'UserSubscription' },
+  metadata: { type: Schema.Types.Mixed },
+  createdAt: { type: Date, default: Date.now }
+});
+TransactionSchema.index({ userId: 1, createdAt: -1 });
+
+// Promo Code Schema
+const PromoCodeSchema = new Schema({
+  code: { type: String, required: true, unique: true, uppercase: true },
+  discountType: { type: String, enum: ['percentage', 'fixed'], default: 'percentage' },
+  discountValue: { type: Number, required: true },
+  maxUses: { type: Number, default: 100 },
+  usedCount: { type: Number, default: 0 },
+  validFrom: { type: Date, default: Date.now },
+  validUntil: { type: Date, required: true },
+  applicablePlans: [{ type: Types.ObjectId, ref: 'SubscriptionPlan' }],
+  isActive: { type: Boolean, default: true },
+  createdBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// Security Event Schema
+const SecurityEventSchema = new Schema({
+  eventType: { type: String, required: true },
+  severity: { type: String, enum: ['low', 'medium', 'high', 'critical'], default: 'medium' },
+  userId: { type: Types.ObjectId, ref: 'User' },
+  adminId: { type: Types.ObjectId, ref: 'AdminUser' },
+  ipAddress: { type: String },
+  userAgent: { type: String },
+  details: { type: Schema.Types.Mixed },
+  resolved: { type: Boolean, default: false },
+  resolvedBy: { type: Types.ObjectId, ref: 'AdminUser' },
+  resolvedAt: { type: Date },
+  createdAt: { type: Date, default: Date.now }
+});
+SecurityEventSchema.index({ eventType: 1, createdAt: -1 });
+
+// ========= MODELS =========
+const PushNotificationModel = mongoose.model('PushNotification', PushNotificationSchema);
+const SupportTicket = mongoose.model('SupportTicket', SupportTicketSchema);
+const SupportMessage = mongoose.model('SupportMessage', SupportMessageSchema);
+const LegalDocument = mongoose.model('LegalDocument', LegalDocumentSchema);
+const LegalDocumentVersion = mongoose.model('LegalDocumentVersion', LegalDocumentVersionSchema);
+const FeatureFlag = mongoose.model('FeatureFlag', FeatureFlagSchema);
+const AppConfig = mongoose.model('AppConfig', AppConfigSchema);
+const UserBan = mongoose.model('UserBan', UserBanSchema);
+const UserSession = mongoose.model('UserSession', UserSessionSchema);
+const SubscriptionPlan = mongoose.model('SubscriptionPlan', SubscriptionPlanSchema);
+const UserSubscription = mongoose.model('UserSubscription', UserSubscriptionSchema);
+const Transaction = mongoose.model('Transaction', TransactionSchema);
+const PromoCode = mongoose.model('PromoCode', PromoCodeSchema);
+const SecurityEvent = mongoose.model('SecurityEvent', SecurityEventSchema);
 
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
@@ -693,28 +922,48 @@ const ADMIN_JWT_SECRET = process.env.ADMIN_JWT_SECRET || 'admin_super_secret_key
 const ADMIN_TOKEN_EXPIRY = '8h';
 const ADMIN_REFRESH_TOKEN_EXPIRY = '7d';
 
+// ========= UPDATE THIS FUNCTION =========
 const getDefaultPermissions = (role) => {
   switch (role) {
     case 'SUPER_ADMIN':
       return [
-        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS', 'DELETE_USERS',
+        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS', 'DELETE_USERS', 'BLOCK_USERS', 'TERMINATE_USERS',
         'VIEW_ANALYTICS', 'VIEW_REPORTS', 'EXPORT_DATA',
         'MANAGE_SETTINGS', 'MANAGE_ADMINS', 'VIEW_LOGS',
-        'MODERATE_CONTENT', 'VIEW_SUPPORT'
+        'MODERATE_CONTENT', 'VIEW_SUPPORT', 'REPLY_SUPPORT',
+        'SEND_NOTIFICATIONS', 'MANAGE_NOTIFICATIONS',
+        'MANAGE_LEGAL', 'PUBLISH_LEGAL',
+        'MANAGE_FEATURE_FLAGS', 'MANAGE_APP_CONFIG',
+        'MANAGE_SUBSCRIPTIONS', 'MANAGE_TRANSACTIONS', 'ISSUE_REFUNDS',
+        'VIEW_SECURITY', 'MANAGE_SECURITY',
+        'VIEW_SERVER_STATS', 'MANAGE_MAINTENANCE'
       ];
     case 'ADMIN':
       return [
-        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS',
+        'VIEW_DASHBOARD', 'VIEW_USERS', 'EDIT_USERS', 'BLOCK_USERS',
         'VIEW_ANALYTICS', 'VIEW_REPORTS', 'EXPORT_DATA',
-        'VIEW_LOGS', 'MODERATE_CONTENT', 'VIEW_SUPPORT'
+        'VIEW_LOGS', 'MODERATE_CONTENT', 
+        'VIEW_SUPPORT', 'REPLY_SUPPORT',
+        'SEND_NOTIFICATIONS',
+        'MANAGE_LEGAL',
+        'MANAGE_FEATURE_FLAGS',
+        'MANAGE_SUBSCRIPTIONS', 'MANAGE_TRANSACTIONS',
+        'VIEW_SECURITY',
+        'VIEW_SERVER_STATS'
       ];
     case 'MODERATOR':
       return [
-        'VIEW_DASHBOARD', 'VIEW_USERS',
-        'MODERATE_CONTENT', 'VIEW_SUPPORT'
+        'VIEW_DASHBOARD', 'VIEW_USERS', 'BLOCK_USERS',
+        'MODERATE_CONTENT', 
+        'VIEW_SUPPORT', 'REPLY_SUPPORT',
+        'SEND_NOTIFICATIONS',
+        'VIEW_SECURITY'
       ];
     case 'SUPPORT':
-      return ['VIEW_DASHBOARD', 'VIEW_USERS', 'VIEW_SUPPORT'];
+      return [
+        'VIEW_DASHBOARD', 'VIEW_USERS',
+        'VIEW_SUPPORT', 'REPLY_SUPPORT'
+      ];
     default:
       return [];
   }
@@ -6183,78 +6432,87 @@ app.post('/api/admin/auth/change-password', adminAuthRequired, async (req, res) 
 
 // ========= DASHBOARD =========
 
+// ========================================
+// ========= DASHBOARD APIs =========
+// ========================================
+
+// Dashboard Stats
 app.get('/api/admin/dashboard/stats', adminAuthRequired, requireAdminPermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const thisWeek = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const thisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     
-    // User stats
-    const totalUsers = await User.countDocuments();
-    const activeUsers = await User.countDocuments({ isActive: true });
-    const teacherCount = await User.countDocuments({ role: 'TEACHER' });
-    const studentCount = await User.countDocuments({ role: 'STUDENT' });
-    const newUsersToday = await User.countDocuments({ createdAt: { $gte: today } });
-    const newUsersThisWeek = await User.countDocuments({ createdAt: { $gte: thisWeek } });
-    const newUsersThisMonth = await User.countDocuments({ createdAt: { $gte: thisMonth } });
-    const onlineUsers = await User.countDocuments({ isOnline: true });
-    
-    // Content stats
-    const totalClasses = await ClassModel.countDocuments();
-    const totalAssignments = await Assignment.countDocuments();
-    const totalExams = await Exam.countDocuments();
-    const totalNotes = await Note.countDocuments();
-    const totalGroupClasses = await GroupClass.countDocuments();
-    const liveGroupClasses = await GroupClass.countDocuments({ status: 'LIVE' });
-    
-    // Engagement stats
-    const totalLinks = await TeacherStudentLink.countDocuments({ isActive: true });
-    const totalGameScores = await GameScore.countDocuments();
-    const gamesPlayedToday = await GameScore.countDocuments({ playedAt: { $gte: today } });
-    
-    // Subscription stats
-    const freeUsers = await User.countDocuments({ subscriptionStatus: 'free' });
-    const trialUsers = await User.countDocuments({ subscriptionStatus: 'trial' });
-    const activeSubscriptions = await User.countDocuments({ subscriptionStatus: 'active' });
-    const expiredSubscriptions = await User.countDocuments({ subscriptionStatus: 'expired' });
-    
-    await logAdminAction(req.adminId, req.adminEmail, 'VIEW_DASHBOARD', 'DASHBOARD', null, {}, req);
-    
+    const [
+      totalUsers,
+      activeUsers,
+      totalTeachers,
+      totalStudents,
+      newUsersThisMonth,
+      newUsersThisWeek,
+      onlineUsers,
+      totalMessages,
+      totalAssignments,
+      totalClasses,
+      totalExams,
+      totalSubscriptions,
+      activeSubscriptions,
+      totalRevenue
+    ] = await Promise.all([
+      User.countDocuments(),
+      User.countDocuments({ isActive: true }),
+      User.countDocuments({ role: 'TEACHER', isActive: true }),
+      User.countDocuments({ role: 'STUDENT', isActive: true }),
+      User.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      User.countDocuments({ createdAt: { $gte: sevenDaysAgo } }),
+      User.countDocuments({ isOnline: true }),
+      Message.countDocuments(),
+      Assignment.countDocuments(),
+      ClassModel.countDocuments(),
+      Exam.countDocuments(),
+      UserSubscription.countDocuments(),
+      UserSubscription.countDocuments({ status: 'active' }),
+      Transaction.aggregate([
+        { $match: { type: 'subscription', status: 'completed' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ])
+    ]);
+
+    // Calculate growth percentages
+    const prevMonthUsers = await User.countDocuments({ 
+      createdAt: { $gte: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000), $lt: thirtyDaysAgo } 
+    });
+    const userGrowth = prevMonthUsers > 0 ? ((newUsersThisMonth - prevMonthUsers) / prevMonthUsers * 100).toFixed(1) : 0;
+
     res.json({
       success: true,
       stats: {
         users: {
           total: totalUsers,
           active: activeUsers,
-          teachers: teacherCount,
-          students: studentCount,
+          teachers: totalTeachers,
+          students: totalStudents,
           online: onlineUsers,
-          newToday: newUsersToday,
+          newThisMonth: newUsersThisMonth,
           newThisWeek: newUsersThisWeek,
-          newThisMonth: newUsersThisMonth
+          growthPercentage: parseFloat(userGrowth)
         },
         content: {
-          classes: totalClasses,
+          messages: totalMessages,
           assignments: totalAssignments,
-          exams: totalExams,
-          notes: totalNotes,
-          groupClasses: totalGroupClasses,
-          liveClasses: liveGroupClasses
-        },
-        engagement: {
-          teacherStudentLinks: totalLinks,
-          totalGamesPlayed: totalGameScores,
-          gamesPlayedToday: gamesPlayedToday
+          classes: totalClasses,
+          exams: totalExams
         },
         subscriptions: {
-          free: freeUsers,
-          trial: trialUsers,
+          total: totalSubscriptions,
           active: activeSubscriptions,
-          expired: expiredSubscriptions
+          revenue: totalRevenue[0]?.total || 0
+        },
+        system: {
+          uptime: process.uptime(),
+          memoryUsage: process.memoryUsage(),
+          nodeVersion: process.version
         }
-      },
-      generatedAt: new Date()
+      }
     });
   } catch (error) {
     console.error('Dashboard stats error:', error);
@@ -6262,8 +6520,8 @@ app.get('/api/admin/dashboard/stats', adminAuthRequired, requireAdminPermission(
   }
 });
 
-// User Growth Chart Data
-app.get('/api/admin/dashboard/user-growth', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+// User Growth Data
+app.get('/api/admin/dashboard/user-growth', adminAuthRequired, requireAdminPermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
     const { period = '30d' } = req.query;
     
@@ -6272,38 +6530,842 @@ app.get('/api/admin/dashboard/user-growth', adminAuthRequired, requireAdminPermi
     else if (period === '90d') days = 90;
     else if (period === '365d') days = 365;
     
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
     
-    const pipeline = [
-      { $match: { createdAt: { $gte: startDate } } },
+    const growthData = await User.aggregate([
+      {
+        $match: { createdAt: { $gte: startDate } }
+      },
       {
         $group: {
           _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
-            day: { $dayOfMonth: '$createdAt' }
+            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
           },
-          count: { $sum: 1 },
-          teachers: { $sum: { $cond: [{ $eq: ['$role', 'TEACHER'] }, 1, 0] } },
-          students: { $sum: { $cond: [{ $eq: ['$role', 'STUDENT'] }, 1, 0] } }
+          teachers: {
+            $sum: { $cond: [{ $eq: ['$role', 'TEACHER'] }, 1, 0] }
+          },
+          students: {
+            $sum: { $cond: [{ $eq: ['$role', 'STUDENT'] }, 1, 0] }
+          },
+          total: { $sum: 1 }
         }
       },
-      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
-    ];
+      {
+        $sort: { _id: 1 }
+      }
+    ]);
     
-    const data = await User.aggregate(pipeline);
+    res.json({
+      success: true,
+      data: growthData.map(d => ({
+        date: d._id,
+        teachers: d.teachers,
+        students: d.students,
+        total: d.total
+      }))
+    });
+  } catch (error) {
+    console.error('User growth error:', error);
+    res.status(500).json({ error: 'Failed to fetch user growth data' });
+  }
+});
+
+// ========================================
+// ========= SERVER MONITORING APIs =========
+// ========================================
+
+// Server Stats
+app.get('/api/admin/server/stats', adminAuthRequired, requireAdminPermission('VIEW_SERVER_STATS'), async (req, res) => {
+  try {
+    const os = require('os');
     
-    const formatted = data.map(d => ({
-      date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
-      total: d.count,
-      teachers: d.teachers,
-      students: d.students
+    const stats = {
+      uptime: process.uptime(),
+      serverTime: new Date().toISOString(),
+      memory: {
+        total: os.totalmem(),
+        free: os.freemem(),
+        used: os.totalmem() - os.freemem(),
+        usagePercentage: ((os.totalmem() - os.freemem()) / os.totalmem() * 100).toFixed(2)
+      },
+      cpu: {
+        model: os.cpus()[0].model,
+        cores: os.cpus().length,
+        usage: os.loadavg()
+      },
+      process: {
+        memory: process.memoryUsage(),
+        pid: process.pid,
+        nodeVersion: process.version,
+        platform: process.platform
+      },
+      connections: {
+        socketConnections: connectedUsers.size,
+        activeCalls: activeCalls.size
+      }
+    };
+    
+    res.json({ success: true, stats });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch server stats' });
+  }
+});
+
+// Database Stats
+app.get('/api/admin/server/database', adminAuthRequired, requireAdminPermission('VIEW_SERVER_STATS'), async (req, res) => {
+  try {
+    const dbStats = await mongoose.connection.db.stats();
+    const collections = await mongoose.connection.db.listCollections().toArray();
+    
+    const collectionStats = await Promise.all(
+      collections.map(async (col) => {
+        const stats = await mongoose.connection.db.collection(col.name).stats();
+        return {
+          name: col.name,
+          documents: stats.count,
+          size: stats.size,
+          avgDocSize: stats.avgObjSize,
+          indexes: stats.nindexes
+        };
+      })
+    );
+    
+    res.json({
+      success: true,
+      database: {
+        name: mongoose.connection.name,
+        collections: dbStats.collections,
+        dataSize: dbStats.dataSize,
+        storageSize: dbStats.storageSize,
+        indexes: dbStats.indexes,
+        indexSize: dbStats.indexSize,
+        collections: collectionStats.sort((a, b) => b.documents - a.documents)
+      }
+    });
+  } catch (error) {
+    console.error('Database stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch database stats' });
+  }
+});
+
+// Socket Stats
+app.get('/api/admin/server/sockets', adminAuthRequired, requireAdminPermission('VIEW_SERVER_STATS'), async (req, res) => {
+  try {
+    const sockets = Array.from(connectedUsers.entries()).map(([userId, socketId]) => ({
+      userId,
+      socketId,
+      connected: true
     }));
     
-    res.json({ success: true, data: formatted });
+    res.json({
+      success: true,
+      sockets: {
+        total: connectedUsers.size,
+        connections: sockets,
+        activeCalls: activeCalls.size
+      }
+    });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch user growth data' });
+    res.status(500).json({ error: 'Failed to fetch socket stats' });
+  }
+});
+
+// Server Logs (last 100 entries)
+app.get('/api/admin/server/logs', adminAuthRequired, requireAdminPermission('VIEW_LOGS'), async (req, res) => {
+  try {
+    const { limit = 100, level } = req.query;
+    
+    // In production, read from actual log files or logging service
+    const recentLogs = await AdminAuditLog.find(level ? { action: { $regex: level, $options: 'i' } } : {})
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+    
+    res.json({
+      success: true,
+      logs: recentLogs.map(log => ({
+        timestamp: log.createdAt,
+        level: log.status === 'SUCCESS' ? 'info' : 'error',
+        message: `${log.action} - ${log.resource}`,
+        details: log.details
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+});
+
+// ========================================
+// ========= REAL-TIME ANALYTICS APIs =========
+// ========================================
+
+// Live Users
+app.get('/api/admin/analytics/live-users', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const onlineUsers = await User.find({ isOnline: true })
+      .select('name email role lastSeen')
+      .sort({ lastSeen: -1 })
+      .limit(100)
+      .lean();
+    
+    res.json({
+      success: true,
+      count: onlineUsers.length,
+      users: onlineUsers.map(u => ({
+        id: u._id.toString(),
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        lastSeen: u.lastSeen
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch live users' });
+  }
+});
+
+// Activity Feed
+app.get('/api/admin/analytics/activity-feed', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const { limit = 50 } = req.query;
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+    
+    const [recentMessages, recentAssignments, recentLogins] = await Promise.all([
+      Message.find({ createdAt: { $gte: fiveMinutesAgo } })
+        .populate('senderId', 'name role')
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean(),
+      Assignment.find({ createdAt: { $gte: fiveMinutesAgo } })
+        .populate('teacherId', 'name')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      User.find({ lastLogin: { $gte: fiveMinutesAgo } })
+        .select('name role lastLogin')
+        .sort({ lastLogin: -1 })
+        .limit(20)
+        .lean()
+    ]);
+    
+    const activities = [
+      ...recentMessages.map(m => ({
+        type: 'message',
+        user: m.senderId?.name,
+        action: 'sent a message',
+        timestamp: m.createdAt
+      })),
+      ...recentAssignments.map(a => ({
+        type: 'assignment',
+        user: a.teacherId?.name,
+        action: 'created assignment',
+        timestamp: a.createdAt
+      })),
+      ...recentLogins.map(u => ({
+        type: 'login',
+        user: u.name,
+        action: 'logged in',
+        timestamp: u.lastLogin
+      }))
+    ].sort((a, b) => b.timestamp - a.timestamp).slice(0, parseInt(limit));
+    
+    res.json({ success: true, activities });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch activity feed' });
+  }
+});
+
+// Performance Metrics
+app.get('/api/admin/analytics/performance', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      performance: {
+        avgResponseTime: 150, // Implement actual metrics
+        requestsPerMinute: 45,
+        errorRate: 0.5,
+        activeConnections: connectedUsers.size,
+        dbQueryTime: 25
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch performance metrics' });
+  }
+});
+
+// Error Logs
+app.get('/api/admin/analytics/errors', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const errors = await AdminAuditLog.find({ status: 'FAILED' })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+    
+    res.json({
+      success: true,
+      errors: errors.map(e => ({
+        timestamp: e.createdAt,
+        action: e.action,
+        admin: e.adminEmail,
+        details: e.details
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch error logs' });
+  }
+});
+
+// ========================================
+// ========= CONTENT MANAGEMENT APIs =========
+// ========================================
+
+// Get All Classes
+app.get('/api/admin/content/classes', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [classes, total] = await Promise.all([
+      ClassModel.find()
+        .populate('teacherId', 'name email')
+        .populate('studentId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      ClassModel.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      classes: classes.map(c => ({
+        id: c._id.toString(),
+        teacher: c.teacherId?.name,
+        teacherEmail: c.teacherId?.email,
+        subject: c.subject,
+        title: c.title,
+        dayOfWeek: c.dayOfWeek,
+        startTime: c.startTime,
+        endTime: c.endTime,
+        scope: c.scope,
+        isActive: c.isActive,
+        createdAt: c.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch classes' });
+  }
+});
+
+// Get All Assignments
+app.get('/api/admin/content/assignments', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [assignments, total] = await Promise.all([
+      Assignment.find()
+        .populate('teacherId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Assignment.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      assignments: assignments.map(a => ({
+        id: a._id.toString(),
+        teacher: a.teacherId?.name,
+        title: a.title,
+        description: a.description,
+        dueAt: a.dueAt,
+        status: a.status,
+        priority: a.priority,
+        submissionCount: a.submissionCount,
+        createdAt: a.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+// Get All Exams
+app.get('/api/admin/content/exams', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [exams, total] = await Promise.all([
+      Exam.find()
+        .populate('teacherId', 'name email')
+        .sort({ whenAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Exam.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      exams: exams.map(e => ({
+        id: e._id.toString(),
+        teacher: e.teacherId?.name,
+        title: e.title,
+        description: e.description,
+        whenAt: e.whenAt,
+        maxMarks: e.maxMarks,
+        duration: e.duration,
+        isActive: e.isActive,
+        createdAt: e.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch exams' });
+  }
+});
+
+// Get All Notes
+app.get('/api/admin/content/notes', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [notes, total] = await Promise.all([
+      Note.find()
+        .populate('teacherId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Note.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      notes: notes.map(n => ({
+        id: n._id.toString(),
+        teacher: n.teacherId?.name,
+        title: n.title,
+        subject: n.subject,
+        category: n.category,
+        isPinned: n.isPinned,
+        createdAt: n.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// Get All Group Classes
+app.get('/api/admin/content/group-classes', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [groupClasses, total] = await Promise.all([
+      GroupClass.find()
+        .populate('teacherId', 'name email')
+        .sort({ scheduledAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      GroupClass.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      groupClasses: groupClasses.map(gc => ({
+        id: gc._id.toString(),
+        teacher: gc.teacherId?.name,
+        title: gc.title,
+        subject: gc.subject,
+        scheduledAt: gc.scheduledAt,
+        duration: gc.duration,
+        status: gc.status,
+        studentCount: gc.studentIds?.length || 0,
+        createdAt: gc.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch group classes' });
+  }
+});
+
+// ========================================
+// ========= CHAT MANAGEMENT APIs =========
+// ========================================
+
+// Get All Conversations
+app.get('/api/admin/chat/conversations', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 50 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [conversations, total] = await Promise.all([
+      Conversation.find()
+        .populate('teacherId', 'name email avatar')
+        .populate('studentId', 'name email avatar')
+        .sort({ lastMessageAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Conversation.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      conversations: conversations.map(c => ({
+        id: c._id.toString(),
+        teacher: { id: c.teacherId?._id, name: c.teacherId?.name, email: c.teacherId?.email },
+        student: { id: c.studentId?._id, name: c.studentId?.name, email: c.studentId?.email },
+        lastMessage: c.lastMessage,
+        lastMessageAt: c.lastMessageAt,
+        createdAt: c.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch conversations' });
+  }
+});
+
+// Get All Messages (with filters)
+app.get('/api/admin/chat/messages', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 100, conversationId } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const query = conversationId ? { conversationId } : {};
+    
+    const [messages, total] = await Promise.all([
+      Message.find(query)
+        .populate('senderId', 'name role')
+        .populate('receiverId', 'name role')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Message.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      messages: messages.map(m => ({
+        id: m._id.toString(),
+        sender: m.senderId?.name,
+        receiver: m.receiverId?.name,
+        content: m.content,
+        type: m.type,
+        delivered: m.delivered,
+        read: m.read,
+        createdAt: m.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Chat Statistics
+app.get('/api/admin/chat/stats', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const [totalMessages, todayMessages, totalConversations, activeConversations] = await Promise.all([
+      Message.countDocuments(),
+      Message.countDocuments({ createdAt: { $gte: today } }),
+      Conversation.countDocuments(),
+      Conversation.countDocuments({ lastMessageAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
+    ]);
+    
+    res.json({
+      success: true,
+      stats: {
+        totalMessages,
+        todayMessages,
+        totalConversations,
+        activeConversations
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch chat stats' });
+  }
+});
+
+// ========================================
+// ========= GAMES MANAGEMENT APIs =========
+// ========================================
+
+// Get Game Scores
+app.get('/api/admin/games/scores', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 50, gameType } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const query = gameType ? { gameType } : {};
+    
+    const [scores, total] = await Promise.all([
+      GameScore.find(query)
+        .populate('userId', 'name email role')
+        .sort({ score: -1, playedAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      GameScore.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      scores: scores.map(s => ({
+        id: s._id.toString(),
+        user: s.userId?.name,
+        username: s.username,
+        gameType: s.gameType,
+        score: s.score,
+        xpEarned: s.xpEarned,
+        difficulty: s.difficulty,
+        playedAt: s.playedAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch game scores' });
+  }
+});
+
+// Get Leaderboard
+app.get('/api/admin/games/leaderboard', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const { gameType, limit = 100 } = req.query;
+    
+    const matchStage = gameType ? { gameType } : {};
+    
+    const leaderboard = await GameScore.aggregate([
+      { $match: matchStage },
+      {
+        $group: {
+          _id: '$userId',
+          username: { $first: '$username' },
+          totalScore: { $sum: '$score' },
+          totalXP: { $sum: '$xpEarned' },
+          gamesPlayed: { $sum: 1 },
+          avgScore: { $avg: '$score' }
+        }
+      },
+      { $sort: { totalXP: -1 } },
+      { $limit: parseInt(limit) }
+    ]);
+    
+    const enriched = await Promise.all(
+      leaderboard.map(async (entry, index) => {
+        const user = await User.findById(entry._id).select('name email role avatar').lean();
+        return {
+          rank: index + 1,
+          userId: entry._id.toString(),
+          name: user?.name || entry.username,
+          email: user?.email,
+          role: user?.role,
+          avatar: user?.avatar,
+          totalScore: entry.totalScore,
+          totalXP: entry.totalXP,
+          gamesPlayed: entry.gamesPlayed,
+          avgScore: Math.round(entry.avgScore)
+        };
+      })
+    );
+    
+    res.json({ success: true, leaderboard: enriched });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch leaderboard' });
+  }
+});
+
+// Game Statistics
+app.get('/api/admin/games/stats', adminAuthRequired, requireAdminPermission('VIEW_ANALYTICS'), async (req, res) => {
+  try {
+    const [totalGames, uniquePlayers, avgScore, topGame] = await Promise.all([
+      GameScore.countDocuments(),
+      GameScore.distinct('userId').then(arr => arr.length),
+      GameScore.aggregate([{ $group: { _id: null, avg: { $avg: '$score' } } }]),
+      GameScore.aggregate([
+        { $group: { _id: '$gameType', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 1 }
+      ])
+    ]);
+    
+    res.json({
+      success: true,
+      stats: {
+        totalGames,
+        uniquePlayers,
+        avgScore: Math.round(avgScore[0]?.avg || 0),
+        mostPopular: topGame[0]?._id || 'N/A'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch game stats' });
+  }
+});
+
+// ========================================
+// ========= SECURITY MANAGEMENT APIs =========
+// ========================================
+
+// Get All Active Sessions
+app.get('/api/admin/security/sessions', adminAuthRequired, requireAdminPermission('VIEW_SECURITY'), async (req, res) => {
+  try {
+    const sessions = await UserSession.find({ isActive: true })
+      .populate('userId', 'name email role')
+      .sort({ lastActivity: -1 })
+      .limit(200)
+      .lean();
+    
+    res.json({
+      success: true,
+      sessions: sessions.map(s => ({
+        id: s._id.toString(),
+        user: { name: s.userId?.name, email: s.userId?.email, role: s.userId?.role },
+        deviceType: s.deviceType,
+        ipAddress: s.ipAddress,
+        location: s.location,
+        lastActivity: s.lastActivity,
+        createdAt: s.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+});
+
+// Get Blocked IPs (placeholder - implement IP blocking schema if needed)
+app.get('/api/admin/security/blocked-ips', adminAuthRequired, requireAdminPermission('VIEW_SECURITY'), async (req, res) => {
+  try {
+    // Implement IP blocking collection if needed
+    res.json({ success: true, blockedIps: [] });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch blocked IPs' });
+  }
+});
+
+// Security Event Logs
+app.get('/api/admin/security/logs', adminAuthRequired, requireAdminPermission('VIEW_SECURITY'), async (req, res) => {
+  try {
+    const { page = 1, limit = 100 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [events, total] = await Promise.all([
+      SecurityEvent.find()
+        .populate('userId', 'name email')
+        .populate('adminId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      SecurityEvent.countDocuments()
+    ]);
+    
+    res.json({
+      success: true,
+      events: events.map(e => ({
+        id: e._id.toString(),
+        type: e.eventType,
+        severity: e.severity,
+        user: e.userId?.name,
+        admin: e.adminId?.name,
+        ipAddress: e.ipAddress,
+        details: e.details,
+        resolved: e.resolved,
+        createdAt: e.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch security logs' });
+  }
+});
+
+// 2FA Settings (placeholder)
+app.get('/api/admin/security/2fa', adminAuthRequired, requireAdminPermission('MANAGE_SECURITY'), async (req, res) => {
+  try {
+    const admin = await AdminUser.findById(req.adminId).select('twoFactorEnabled');
+    res.json({
+      success: true,
+      twoFactorEnabled: admin?.twoFactorEnabled || false
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch 2FA settings' });
+  }
+});
+
+// Get all notifications
+app.get('/api/admin/notifications', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const notifications = await PushNotificationModel.find()
+      .populate('createdBy', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+    
+    res.json({
+      success: true,
+      notifications: notifications.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        body: n.body,
+        type: n.type,
+        status: n.status,
+        sentCount: n.sentCount,
+        openedCount: n.openedCount,
+        createdAt: n.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// Broadcast notification (alias for existing send)
+app.post('/api/admin/notifications/broadcast', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  // Same as /api/admin/push-notifications/send
+  return app._router.handle(Object.assign(req, { url: '/api/admin/push-notifications/send' }), res);
+});
+
+// Notification stats
+app.get('/api/admin/notifications/stats', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const stats = await PushNotificationModel.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalSent: { $sum: '$sentCount' },
+          totalOpened: { $sum: '$openedCount' },
+          avgOpenRate: { $avg: { $cond: [{ $gt: ['$sentCount', 0] }, { $divide: ['$openedCount', '$sentCount'] }, 0] } }
+        }
+      }
+    ]);
+    
+    res.json({
+      success: true,
+      stats: {
+        totalSent: stats[0]?.totalSent || 0,
+        totalOpened: stats[0]?.totalOpened || 0,
+        openRate: ((stats[0]?.avgOpenRate || 0) * 100).toFixed(1)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notification stats' });
   }
 });
 
@@ -6682,6 +7744,1161 @@ app.put('/api/admin/admins/:id', adminAuthRequired, requireAdminRole(['SUPER_ADM
     res.status(500).json({ error: 'Failed to update admin' });
   }
 });
+
+// ========================================
+// ========= PUSH NOTIFICATIONS APIs =========
+// ========================================
+
+// Get all notifications (with pagination)
+app.get('/api/admin/push-notifications', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const query = {};
+    if (status) query.status = status;
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [notifications, total] = await Promise.all([
+      PushNotificationModel.find(query)
+        .populate('createdBy', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      PushNotificationModel.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      notifications: notifications.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        body: n.body,
+        imageUrl: n.imageUrl,
+        type: n.type,
+        targetType: n.targetType,
+        targetUserIds: n.targetUserIds,
+        scheduledAt: n.scheduledAt,
+        sentAt: n.sentAt,
+        status: n.status,
+        sentCount: n.sentCount,
+        openedCount: n.openedCount,
+        createdBy: n.createdBy?.name,
+        createdAt: n.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    console.error('Get notifications error:', error);
+    res.status(500).json({ error: 'Failed to fetch notifications' });
+  }
+});
+
+// Send push notification
+app.post('/api/admin/push-notifications/send', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const { title, body, imageUrl, type, targetType, targetUserIds, scheduledAt, popupSettings, data } = req.body;
+    
+    if (!title || !body || !targetType) {
+      return res.status(400).json({ error: 'Title, body, and target type are required' });
+    }
+    
+    // Create notification record
+    const notification = await PushNotificationModel.create({
+      title,
+      body,
+      imageUrl,
+      type: type || 'text',
+      targetType,
+      targetUserIds: targetType === 'specific' ? targetUserIds : [],
+      popupSettings,
+      data,
+      scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
+      status: scheduledAt ? 'scheduled' : 'sent',
+      sentAt: scheduledAt ? null : new Date(),
+      createdBy: req.adminId
+    });
+    
+    // If sending immediately, send to users
+    if (!scheduledAt) {
+      let targetUsers = [];
+      
+      if (targetType === 'all') {
+        targetUsers = await User.find({ isActive: true }).select('_id fcmToken');
+      } else if (targetType === 'teachers') {
+        targetUsers = await User.find({ isActive: true, role: 'TEACHER' }).select('_id fcmToken');
+      } else if (targetType === 'students') {
+        targetUsers = await User.find({ isActive: true, role: 'STUDENT' }).select('_id fcmToken');
+      } else if (targetType === 'specific' && targetUserIds?.length > 0) {
+        targetUsers = await User.find({ _id: { $in: targetUserIds }, isActive: true }).select('_id fcmToken');
+      }
+      
+      // Emit to connected users via socket
+      for (const user of targetUsers) {
+        io.to(user._id.toString()).emit('push_notification', {
+          id: notification._id.toString(),
+          title,
+          body,
+          imageUrl,
+          type,
+          data,
+          popupSettings
+        });
+        
+        // Create in-app notification
+        await Notification.create({
+          userId: user._id,
+          type: 'SYSTEM',
+          title,
+          message: body,
+          data: { notificationId: notification._id, ...data }
+        });
+      }
+      
+      notification.sentCount = targetUsers.length;
+      await notification.save();
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'SEND_NOTIFICATION', 'NOTIFICATIONS', notification._id.toString(),
+      { title, targetType, targetCount: notification.sentCount }, req);
+    
+    res.status(201).json({
+      success: true,
+      notificationId: notification._id.toString(),
+      sentCount: notification.sentCount,
+      message: scheduledAt ? 'Notification scheduled successfully' : 'Notification sent successfully'
+    });
+  } catch (error) {
+    console.error('Send notification error:', error);
+    res.status(500).json({ error: 'Failed to send notification' });
+  }
+});
+
+// Delete notification
+app.delete('/api/admin/push-notifications/:id', adminAuthRequired, requireAdminPermission('MANAGE_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const notification = await PushNotificationModel.findByIdAndDelete(req.params.id);
+    if (!notification) {
+      return res.status(404).json({ error: 'Notification not found' });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'DELETE_NOTIFICATION', 'NOTIFICATIONS', req.params.id, {}, req);
+    res.json({ success: true, message: 'Notification deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete notification' });
+  }
+});
+
+// Get notification analytics
+app.get('/api/admin/push-notifications/analytics', adminAuthRequired, requireAdminPermission('SEND_NOTIFICATIONS'), async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    
+    const [totalSent, delivered, opened, recentNotifications] = await Promise.all([
+      PushNotificationModel.aggregate([
+        { $match: { status: 'sent', sentAt: { $gte: thirtyDaysAgo } } },
+        { $group: { _id: null, total: { $sum: '$sentCount' } } }
+      ]),
+      PushNotificationModel.aggregate([
+        { $match: { status: 'sent', sentAt: { $gte: thirtyDaysAgo } } },
+        { $group: { _id: null, total: { $sum: '$deliveredCount' } } }
+      ]),
+      PushNotificationModel.aggregate([
+        { $match: { status: 'sent', sentAt: { $gte: thirtyDaysAgo } } },
+        { $group: { _id: null, total: { $sum: '$openedCount' } } }
+      ]),
+      PushNotificationModel.countDocuments({ sentAt: { $gte: thirtyDaysAgo } })
+    ]);
+    
+    res.json({
+      success: true,
+      analytics: {
+        totalSent: totalSent[0]?.total || 0,
+        delivered: delivered[0]?.total || 0,
+        opened: opened[0]?.total || 0,
+        recentNotifications,
+        deliveryRate: totalSent[0]?.total ? ((delivered[0]?.total || 0) / totalSent[0].total * 100).toFixed(1) : 0,
+        openRate: delivered[0]?.total ? ((opened[0]?.total || 0) / delivered[0].total * 100).toFixed(1) : 0
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch analytics' });
+  }
+});
+
+// ========================================
+// ========= SUPPORT CHAT APIs =========
+// ========================================
+
+// Get all support tickets
+app.get('/api/admin/support/tickets', adminAuthRequired, requireAdminPermission('VIEW_SUPPORT'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, priority } = req.query;
+    const query = {};
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [tickets, total] = await Promise.all([
+      SupportTicket.find(query)
+        .populate('userId', 'name email role avatar')
+        .populate('assignedTo', 'name email')
+        .sort({ lastMessageAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      SupportTicket.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      tickets: tickets.map(t => ({
+        id: t._id.toString(),
+        ticketNumber: t.ticketNumber,
+        user: t.userId ? {
+          id: t.userId._id.toString(),
+          name: t.userId.name,
+          email: t.userId.email,
+          role: t.userId.role,
+          avatar: t.userId.avatar
+        } : null,
+        subject: t.subject,
+        status: t.status,
+        priority: t.priority,
+        assignedTo: t.assignedTo?.name,
+        lastMessageAt: t.lastMessageAt,
+        unreadCount: t.unreadAdminCount,
+        createdAt: t.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    console.error('Get tickets error:', error);
+    res.status(500).json({ error: 'Failed to fetch tickets' });
+  }
+});
+
+// Get ticket messages
+app.get('/api/admin/support/tickets/:id/messages', adminAuthRequired, requireAdminPermission('VIEW_SUPPORT'), async (req, res) => {
+  try {
+    const ticket = await SupportTicket.findById(req.params.id)
+      .populate('userId', 'name email role avatar');
+    
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    const messages = await SupportMessage.find({ ticketId: req.params.id })
+      .sort({ createdAt: 1 })
+      .lean();
+    
+    // Mark messages as read
+    await SupportMessage.updateMany(
+      { ticketId: req.params.id, senderType: 'user', isRead: false },
+      { isRead: true }
+    );
+    ticket.unreadAdminCount = 0;
+    await ticket.save();
+    
+    res.json({
+      success: true,
+      ticket: {
+        id: ticket._id.toString(),
+        ticketNumber: ticket.ticketNumber,
+        user: ticket.userId ? {
+          id: ticket.userId._id.toString(),
+          name: ticket.userId.name,
+          email: ticket.userId.email,
+          role: ticket.userId.role,
+          avatar: ticket.userId.avatar
+        } : null,
+        subject: ticket.subject,
+        status: ticket.status,
+        priority: ticket.priority
+      },
+      messages: messages.map(m => ({
+        id: m._id.toString(),
+        senderId: m.senderId,
+        senderType: m.senderType,
+        senderName: m.senderName,
+        content: m.content,
+        attachmentUrl: m.attachmentUrl,
+        isRead: m.isRead,
+        createdAt: m.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch messages' });
+  }
+});
+
+// Reply to ticket
+app.post('/api/admin/support/tickets/:id/reply', adminAuthRequired, requireAdminPermission('REPLY_SUPPORT'), async (req, res) => {
+  try {
+    const { content, attachmentUrl } = req.body;
+    
+    if (!content) {
+      return res.status(400).json({ error: 'Message content is required' });
+    }
+    
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    const admin = await AdminUser.findById(req.adminId);
+    
+    const message = await SupportMessage.create({
+      ticketId: ticket._id,
+      senderId: req.adminId,
+      senderType: 'admin',
+      senderName: admin.name,
+      content,
+      attachmentUrl
+    });
+    
+    ticket.lastMessageAt = new Date();
+    ticket.unreadUserCount += 1;
+    if (ticket.status === 'open') ticket.status = 'in_progress';
+    if (!ticket.assignedTo) ticket.assignedTo = req.adminId;
+    await ticket.save();
+    
+    // Notify user via socket
+    io.to(ticket.userId.toString()).emit('support_message', {
+      ticketId: ticket._id.toString(),
+      message: {
+        id: message._id.toString(),
+        senderName: admin.name,
+        content,
+        createdAt: message.createdAt
+      }
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'REPLY_SUPPORT_TICKET', 'SUPPORT', req.params.id, 
+      { ticketNumber: ticket.ticketNumber }, req);
+    
+    res.status(201).json({
+      success: true,
+      message: {
+        id: message._id.toString(),
+        content,
+        createdAt: message.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Reply ticket error:', error);
+    res.status(500).json({ error: 'Failed to send reply' });
+  }
+});
+
+// Update ticket status
+app.put('/api/admin/support/tickets/:id/status', adminAuthRequired, requireAdminPermission('REPLY_SUPPORT'), async (req, res) => {
+  try {
+    const { status, priority } = req.body;
+    
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    if (status) ticket.status = status;
+    if (priority) ticket.priority = priority;
+    ticket.updatedAt = new Date();
+    await ticket.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_TICKET_STATUS', 'SUPPORT', req.params.id,
+      { status, priority }, req);
+    
+    res.json({ success: true, message: 'Ticket updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update ticket' });
+  }
+});
+
+// ========================================
+// ========= LEGAL DOCUMENTS APIs =========
+// ========================================
+
+// Get all legal documents
+app.get('/api/admin/legal', adminAuthRequired, requireAdminPermission('MANAGE_LEGAL'), async (req, res) => {
+  try {
+    const documents = await LegalDocument.find()
+      .populate('createdBy', 'name')
+      .sort({ type: 1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      documents: documents.map(d => ({
+        id: d._id.toString(),
+        type: d.type,
+        title: d.title,
+        content: d.content,
+        version: d.version,
+        isPublished: d.isPublished,
+        publishedAt: d.publishedAt,
+        createdBy: d.createdBy?.name,
+        createdAt: d.createdAt,
+        updatedAt: d.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch documents' });
+  }
+});
+
+// Get document version history
+app.get('/api/admin/legal/:type/history', adminAuthRequired, requireAdminPermission('MANAGE_LEGAL'), async (req, res) => {
+  try {
+    const versions = await LegalDocumentVersion.find({ documentType: req.params.type })
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      versions: versions.map(v => ({
+        id: v._id.toString(),
+        version: v.version,
+        changeLog: v.changeLog,
+        createdBy: v.createdBy?.name,
+        createdAt: v.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch history' });
+  }
+});
+
+// Update legal document
+app.put('/api/admin/legal/:type', adminAuthRequired, requireAdminPermission('MANAGE_LEGAL'), async (req, res) => {
+  try {
+    const { title, content, version, changeLog } = req.body;
+    
+    if (!content || !version) {
+      return res.status(400).json({ error: 'Content and version are required' });
+    }
+    
+    let document = await LegalDocument.findOne({ type: req.params.type });
+    
+    if (document) {
+      // Save current version to history
+      await LegalDocumentVersion.create({
+        documentType: req.params.type,
+        version: document.version,
+        content: document.content,
+        changeLog: changeLog || 'Updated',
+        createdBy: req.adminId
+      });
+      
+      document.title = title || document.title;
+      document.content = content;
+      document.version = version;
+      document.updatedAt = new Date();
+      document.createdBy = req.adminId;
+      await document.save();
+    } else {
+      document = await LegalDocument.create({
+        type: req.params.type,
+        title: title || req.params.type.replace('_', ' ').toUpperCase(),
+        content,
+        version,
+        createdBy: req.adminId
+      });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_LEGAL_DOCUMENT', 'LEGAL', req.params.type,
+      { version, changeLog }, req);
+    
+    res.json({ success: true, message: 'Document saved' });
+  } catch (error) {
+    console.error('Update legal doc error:', error);
+    res.status(500).json({ error: 'Failed to update document' });
+  }
+});
+
+// Publish legal document
+app.post('/api/admin/legal/:type/publish', adminAuthRequired, requireAdminPermission('PUBLISH_LEGAL'), async (req, res) => {
+  try {
+    const document = await LegalDocument.findOne({ type: req.params.type });
+    
+    if (!document) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    
+    document.isPublished = true;
+    document.publishedAt = new Date();
+    await document.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'PUBLISH_LEGAL_DOCUMENT', 'LEGAL', req.params.type,
+      { version: document.version }, req);
+    
+    res.json({ success: true, message: 'Document published' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to publish document' });
+  }
+});
+
+// ========================================
+// ========= FEATURE FLAGS APIs =========
+// ========================================
+
+// Get all feature flags
+app.get('/api/admin/feature-flags', adminAuthRequired, requireAdminPermission('MANAGE_FEATURE_FLAGS'), async (req, res) => {
+  try {
+    const flags = await FeatureFlag.find().sort({ category: 1, name: 1 }).lean();
+    
+    res.json({
+      success: true,
+      flags: flags.map(f => ({
+        id: f._id.toString(),
+        key: f.key,
+        name: f.name,
+        description: f.description,
+        isEnabled: f.isEnabled,
+        targetAudience: f.targetAudience,
+        rolloutPercentage: f.rolloutPercentage,
+        category: f.category,
+        updatedAt: f.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch feature flags' });
+  }
+});
+
+// Create feature flag
+app.post('/api/admin/feature-flags', adminAuthRequired, requireAdminPermission('MANAGE_FEATURE_FLAGS'), async (req, res) => {
+  try {
+    const { key, name, description, category } = req.body;
+    
+    if (!key || !name) {
+      return res.status(400).json({ error: 'Key and name are required' });
+    }
+    
+    const existing = await FeatureFlag.findOne({ key });
+    if (existing) {
+      return res.status(409).json({ error: 'Feature flag with this key already exists' });
+    }
+    
+    const flag = await FeatureFlag.create({
+      key,
+      name,
+      description,
+      category: category || 'General',
+      updatedBy: req.adminId
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'CREATE_FEATURE_FLAG', 'FEATURE_FLAGS', flag._id.toString(),
+      { key, name }, req);
+    
+    res.status(201).json({ success: true, flagId: flag._id.toString() });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create feature flag' });
+  }
+});
+
+// Toggle feature flag
+app.put('/api/admin/feature-flags/:id/toggle', adminAuthRequired, requireAdminPermission('MANAGE_FEATURE_FLAGS'), async (req, res) => {
+  try {
+    const { isEnabled, rolloutPercentage, targetAudience } = req.body;
+    
+    const flag = await FeatureFlag.findById(req.params.id);
+    if (!flag) {
+      return res.status(404).json({ error: 'Feature flag not found' });
+    }
+    
+    if (typeof isEnabled === 'boolean') flag.isEnabled = isEnabled;
+    if (rolloutPercentage !== undefined) flag.rolloutPercentage = rolloutPercentage;
+    if (targetAudience) flag.targetAudience = targetAudience;
+    flag.updatedBy = req.adminId;
+    flag.updatedAt = new Date();
+    await flag.save();
+    
+    // Broadcast to all connected users
+    io.emit('feature_flag_update', {
+      key: flag.key,
+      isEnabled: flag.isEnabled,
+      rolloutPercentage: flag.rolloutPercentage
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_FEATURE_FLAG', 'FEATURE_FLAGS', req.params.id,
+      { key: flag.key, isEnabled, rolloutPercentage }, req);
+    
+    res.json({ success: true, message: 'Feature flag updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update feature flag' });
+  }
+});
+
+// ========================================
+// ========= APP CONFIGURATION APIs =========
+// ========================================
+
+// Get all app configs
+app.get('/api/admin/app-config', adminAuthRequired, requireAdminPermission('MANAGE_APP_CONFIG'), async (req, res) => {
+  try {
+    const configs = await AppConfig.find().sort({ category: 1 }).lean();
+    
+    res.json({
+      success: true,
+      configs: configs.map(c => ({
+        key: c.key,
+        value: c.isSecret ? '••••••••' : c.value,
+        type: c.type,
+        category: c.category,
+        description: c.description,
+        isSecret: c.isSecret,
+        updatedAt: c.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch configs' });
+  }
+});
+
+// Update app config
+app.put('/api/admin/app-config/:key', adminAuthRequired, requireAdminPermission('MANAGE_APP_CONFIG'), async (req, res) => {
+  try {
+    const { value, type, category, description } = req.body;
+    
+    const config = await AppConfig.findOneAndUpdate(
+      { key: req.params.key },
+      {
+        value,
+        type: type || 'string',
+        category: category || 'General',
+        description,
+        updatedBy: req.adminId,
+        updatedAt: new Date()
+      },
+      { upsert: true, new: true }
+    );
+    
+    // Special handling for maintenance mode
+    if (req.params.key === 'maintenance_mode' && value === true) {
+      io.emit('maintenance_mode', { enabled: true, message: 'App is under maintenance' });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_APP_CONFIG', 'APP_CONFIG', req.params.key,
+      { category }, req);
+    
+    res.json({ success: true, message: 'Config updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update config' });
+  }
+});
+
+// Get maintenance status (public)
+app.get('/api/maintenance-status', async (req, res) => {
+  try {
+    const maintenanceMode = await AppConfig.findOne({ key: 'maintenance_mode' });
+    const maintenanceMessage = await AppConfig.findOne({ key: 'maintenance_message' });
+    
+    res.json({
+      isMaintenanceMode: maintenanceMode?.value === true || maintenanceMode?.value === 'true',
+      message: maintenanceMessage?.value || 'App is under maintenance. Please try again later.'
+    });
+  } catch (error) {
+    res.json({ isMaintenanceMode: false });
+  }
+});
+
+// ========================================
+// ========= USER CONTROL APIs =========
+// ========================================
+
+// Block user
+app.post('/api/admin/users/:id/block', adminAuthRequired, requireAdminPermission('BLOCK_USERS'), async (req, res) => {
+  try {
+    const { reason, banType, bannedUntil } = req.body;
+    
+    if (!reason) {
+      return res.status(400).json({ error: 'Reason is required' });
+    }
+    
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Deactivate user
+    user.isActive = false;
+    user.isOnline = false;
+    await user.save();
+    
+    // Create ban record
+    await UserBan.create({
+      userId: user._id,
+      reason,
+      banType: banType || 'temporary',
+      bannedUntil: bannedUntil ? new Date(bannedUntil) : null,
+      bannedBy: req.adminId
+    });
+    
+    // Disconnect user socket
+    const socketId = connectedUsers.get(req.params.id);
+    if (socketId) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.emit('account_blocked', { reason });
+        socket.disconnect(true);
+      }
+      connectedUsers.delete(req.params.id);
+    }
+    
+    // Kill all active sessions
+    await UserSession.updateMany({ userId: user._id }, { isActive: false });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'BLOCK_USER', 'USERS', req.params.id,
+      { email: user.email, reason, banType, bannedUntil }, req);
+    
+    // Create security event
+    await SecurityEvent.create({
+      eventType: 'USER_BLOCKED',
+      severity: 'medium',
+      userId: user._id,
+      adminId: req.adminId,
+      ipAddress: req.ip,
+      details: { reason, banType }
+    });
+    
+    res.json({ success: true, message: 'User blocked successfully' });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({ error: 'Failed to block user' });
+  }
+});
+
+// Unblock user
+app.post('/api/admin/users/:id/unblock', adminAuthRequired, requireAdminPermission('BLOCK_USERS'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    user.isActive = true;
+    await user.save();
+    
+    // Update ban record
+    await UserBan.findOneAndUpdate(
+      { userId: user._id, isActive: true },
+      { isActive: false, unbannedBy: req.adminId, unbannedAt: new Date() }
+    );
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UNBLOCK_USER', 'USERS', req.params.id,
+      { email: user.email }, req);
+    
+    res.json({ success: true, message: 'User unblocked' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to unblock user' });
+  }
+});
+
+// Terminate user (permanent delete)
+app.post('/api/admin/users/:id/terminate', adminAuthRequired, requireAdminPermission('TERMINATE_USERS'), async (req, res) => {
+  try {
+    // Only SUPER_ADMIN can terminate
+    if (req.adminRole !== 'SUPER_ADMIN') {
+      return res.status(403).json({ error: 'Only Super Admin can terminate users' });
+    }
+    
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const userEmail = user.email;
+    
+    // Delete all user data
+    await Promise.all([
+      TeacherStudentLink.deleteMany({ $or: [{ teacherId: user._id }, { studentId: user._id }] }),
+      Message.deleteMany({ $or: [{ senderId: user._id }, { receiverId: user._id }] }),
+      Conversation.deleteMany({ $or: [{ teacherId: user._id }, { studentId: user._id }] }),
+      Notification.deleteMany({ userId: user._id }),
+      Result.deleteMany({ $or: [{ teacherId: user._id }, { studentId: user._id }] }),
+      PlannerTask.deleteMany({ userId: user._id }),
+      UserSession.deleteMany({ userId: user._id }),
+      UserBan.deleteMany({ userId: user._id }),
+      User.findByIdAndDelete(user._id)
+    ]);
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'TERMINATE_USER', 'USERS', req.params.id,
+      { email: userEmail }, req);
+    
+    // Create security event
+    await SecurityEvent.create({
+      eventType: 'USER_TERMINATED',
+      severity: 'high',
+      adminId: req.adminId,
+      ipAddress: req.ip,
+      details: { userEmail }
+    });
+    
+    res.json({ success: true, message: 'User terminated and all data deleted' });
+  } catch (error) {
+    console.error('Terminate user error:', error);
+    res.status(500).json({ error: 'Failed to terminate user' });
+  }
+});
+
+// Get user location by IP
+app.get('/api/admin/users/:id/location', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Get latest session with IP
+    const session = await UserSession.findOne({ userId: user._id })
+      .sort({ lastActivity: -1 })
+      .lean();
+    
+    if (!session?.ipAddress) {
+      return res.json({ success: true, location: null, message: 'No IP data available' });
+    }
+    
+    // In production, use a real IP geolocation service (ip-api.com, ipstack, etc.)
+    // This is a mock response
+    const mockLocation = {
+      ip: session.ipAddress,
+      city: 'Mumbai',
+      region: 'Maharashtra',
+      country: 'India',
+      countryCode: 'IN',
+      latitude: 19.0760,
+      longitude: 72.8777,
+      isp: 'Jio Platforms Limited',
+      timezone: 'Asia/Kolkata'
+    };
+    
+    res.json({ success: true, location: mockLocation });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get location' });
+  }
+});
+
+// Get user sessions
+app.get('/api/admin/users/:id/sessions', adminAuthRequired, requireAdminPermission('VIEW_USERS'), async (req, res) => {
+  try {
+    const sessions = await UserSession.find({ userId: req.params.id, isActive: true })
+      .sort({ lastActivity: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      sessions: sessions.map(s => ({
+        id: s._id.toString(),
+        deviceType: s.deviceType,
+        deviceName: s.deviceName,
+        ipAddress: s.ipAddress,
+        location: s.location,
+        lastActivity: s.lastActivity,
+        createdAt: s.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+});
+
+// Kill user session
+app.post('/api/admin/users/:userId/sessions/:sessionId/kill', adminAuthRequired, requireAdminPermission('BLOCK_USERS'), async (req, res) => {
+  try {
+    await UserSession.findByIdAndUpdate(req.params.sessionId, { isActive: false });
+    
+    // Disconnect socket if connected
+    const socketId = connectedUsers.get(req.params.userId);
+    if (socketId) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.emit('session_killed');
+        socket.disconnect(true);
+      }
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'KILL_USER_SESSION', 'USERS', req.params.userId,
+      { sessionId: req.params.sessionId }, req);
+    
+    res.json({ success: true, message: 'Session terminated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to kill session' });
+  }
+});
+
+// ========================================
+// ========= SUBSCRIPTION APIs =========
+// ========================================
+
+// Get subscription plans
+app.get('/api/admin/subscriptions/plans', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const plans = await SubscriptionPlan.find().sort({ price: 1 }).lean();
+    
+    res.json({
+      success: true,
+      plans: plans.map(p => ({
+        id: p._id.toString(),
+        name: p.name,
+        description: p.description,
+        price: p.price,
+        currency: p.currency,
+        duration: p.duration,
+        features: p.features,
+        isActive: p.isActive,
+        subscriberCount: p.subscriberCount,
+        createdAt: p.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch plans' });
+  }
+});
+
+// Create subscription plan
+app.post('/api/admin/subscriptions/plans', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const { name, description, price, currency, duration, features } = req.body;
+    
+    if (!name || price === undefined || !duration) {
+      return res.status(400).json({ error: 'Name, price, and duration are required' });
+    }
+    
+    const plan = await SubscriptionPlan.create({
+      name,
+      description,
+      price,
+      currency: currency || 'INR',
+      duration,
+      features: features || [],
+      createdBy: req.adminId
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'CREATE_SUBSCRIPTION_PLAN', 'SUBSCRIPTIONS', plan._id.toString(),
+      { name, price }, req);
+    
+    res.status(201).json({ success: true, planId: plan._id.toString() });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create plan' });
+  }
+});
+
+// Update subscription plan
+app.put('/api/admin/subscriptions/plans/:id', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const { name, description, price, features, isActive } = req.body;
+    
+    const plan = await SubscriptionPlan.findById(req.params.id);
+    if (!plan) {
+      return res.status(404).json({ error: 'Plan not found' });
+    }
+    
+    if (name) plan.name = name;
+    if (description !== undefined) plan.description = description;
+    if (price !== undefined) plan.price = price;
+    if (features) plan.features = features;
+    if (typeof isActive === 'boolean') plan.isActive = isActive;
+    plan.updatedAt = new Date();
+    await plan.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'UPDATE_SUBSCRIPTION_PLAN', 'SUBSCRIPTIONS', req.params.id,
+      { name, isActive }, req);
+    
+    res.json({ success: true, message: 'Plan updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update plan' });
+  }
+});
+
+// Get user subscriptions
+app.get('/api/admin/subscriptions/users', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const query = {};
+    if (status) query.status = status;
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [subscriptions, total] = await Promise.all([
+      UserSubscription.find(query)
+        .populate('userId', 'name email role')
+        .populate('planId', 'name price duration')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      UserSubscription.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      subscriptions: subscriptions.map(s => ({
+        id: s._id.toString(),
+        user: s.userId ? { id: s.userId._id.toString(), name: s.userId.name, email: s.userId.email } : null,
+        plan: s.planId ? { name: s.planId.name, price: s.planId.price, duration: s.planId.duration } : null,
+        status: s.status,
+        startDate: s.startDate,
+        endDate: s.endDate,
+        amount: s.amount,
+        paymentMethod: s.paymentMethod,
+        createdAt: s.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch subscriptions' });
+  }
+});
+
+// Get transactions
+app.get('/api/admin/transactions', adminAuthRequired, requireAdminPermission('MANAGE_TRANSACTIONS'), async (req, res) => {
+  try {
+    const { page = 1, limit = 20, type, status } = req.query;
+    const query = {};
+    if (type) query.type = type;
+    if (status) query.status = status;
+    
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [transactions, total] = await Promise.all([
+      Transaction.find(query)
+        .populate('userId', 'name email')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit))
+        .lean(),
+      Transaction.countDocuments(query)
+    ]);
+    
+    res.json({
+      success: true,
+      transactions: transactions.map(t => ({
+        id: t._id.toString(),
+        user: t.userId ? { name: t.userId.name, email: t.userId.email } : null,
+        type: t.type,
+        amount: t.amount,
+        currency: t.currency,
+        status: t.status,
+        paymentMethod: t.paymentMethod,
+        orderId: t.orderId,
+        createdAt: t.createdAt
+      })),
+      pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / parseInt(limit)) }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+// Issue refund
+app.post('/api/admin/transactions/:id/refund', adminAuthRequired, requireAdminPermission('ISSUE_REFUNDS'), async (req, res) => {
+  try {
+    const { reason } = req.body;
+    
+    const transaction = await Transaction.findById(req.params.id);
+    if (!transaction) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+    
+    if (transaction.status !== 'completed') {
+      return res.status(400).json({ error: 'Can only refund completed transactions' });
+    }
+    
+    // Create refund transaction
+    await Transaction.create({
+      userId: transaction.userId,
+      type: 'refund',
+      amount: transaction.amount,
+      currency: transaction.currency,
+      status: 'completed',
+      paymentMethod: transaction.paymentMethod,
+      metadata: { originalTransactionId: transaction._id, reason }
+    });
+    
+    transaction.status = 'refunded';
+    await transaction.save();
+    
+    // Update user subscription if applicable
+    if (transaction.subscriptionId) {
+      await UserSubscription.findByIdAndUpdate(transaction.subscriptionId, { status: 'cancelled' });
+      await User.findByIdAndUpdate(transaction.userId, { subscriptionStatus: 'free' });
+    }
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'ISSUE_REFUND', 'TRANSACTIONS', req.params.id,
+      { amount: transaction.amount, reason }, req);
+    
+    res.json({ success: true, message: 'Refund issued successfully' });
+  } catch (error) {
+    console.error('Refund error:', error);
+    res.status(500).json({ error: 'Failed to issue refund' });
+  }
+});
+
+// Get promo codes
+app.get('/api/admin/promo-codes', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const codes = await PromoCode.find().sort({ createdAt: -1 }).lean();
+    
+    res.json({
+      success: true,
+      promoCodes: codes.map(c => ({
+        id: c._id.toString(),
+        code: c.code,
+        discountType: c.discountType,
+        discountValue: c.discountValue,
+        maxUses: c.maxUses,
+        usedCount: c.usedCount,
+        validFrom: c.validFrom,
+        validUntil: c.validUntil,
+        isActive: c.isActive,
+        createdAt: c.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch promo codes' });
+  }
+});
+
+// Create promo code
+app.post('/api/admin/promo-codes', adminAuthRequired, requireAdminPermission('MANAGE_SUBSCRIPTIONS'), async (req, res) => {
+  try {
+    const { code, discountType, discountValue, maxUses, validUntil } = req.body;
+    
+    if (!code || !discountValue || !validUntil) {
+      return res.status(400).json({ error: 'Code, discount value, and expiry are required' });
+    }
+    
+    const existing = await PromoCode.findOne({ code: code.toUpperCase() });
+    if (existing) {
+      return res.status(409).json({ error: 'Promo code already exists' });
+    }
+    
+    const promoCode = await PromoCode.create({
+      code: code.toUpperCase(),
+      discountType: discountType || 'percentage',
+      discountValue,
+      maxUses: maxUses || 100,
+      validUntil: new Date(validUntil),
+      createdBy: req.adminId
+    });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'CREATE_PROMO_CODE', 'PROMO_CODES', promoCode._id.toString(),
+      { code: promoCode.code }, req);
+    
+    res.status(201).json({ success: true, promoCodeId: promoCode._id.toString() });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create promo code' });
+  }
+});
+
+// ========================================
+// ========= SERVER MONITORING APIs =========
+// ========================================
+
+// Get server
 
 // Delete Admin
 app.delete('/api/admin/admins/:id', adminAuthRequired, requireAdminRole(['SUPER_ADMIN']), async (req, res) => {
