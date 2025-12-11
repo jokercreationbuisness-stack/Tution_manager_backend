@@ -550,6 +550,12 @@ const AdminUserSchema = new Schema({
   isActive: { type: Boolean, default: true },
   twoFactorEnabled: { type: Boolean, default: false },
   twoFactorSecret: { type: String },
+  // ===== ADD THESE 2 NEW FIELDS =====
+  twoFactorTempSecret: { type: String }, // Temporary secret during 2FA setup
+  twoFactorBackupCodes: [{
+    code: { type: String },
+    used: { type: Boolean, default: false }
+  }],
   lastLogin: { type: Date },
   lastLoginIP: { type: String },
   failedLoginAttempts: { type: Number, default: 0 },
@@ -6194,6 +6200,7 @@ app.use('/api/admin/', adminLimiter);
 // ========= ADMIN AUTH =========
 
 // Admin Login
+// Admin Login (WITH 2FA SUPPORT)
 app.post('/api/admin/auth/login', async (req, res) => {
   try {
     const { email, password, deviceInfo } = req.body;
@@ -6212,7 +6219,7 @@ app.post('/api/admin/auth/login', async (req, res) => {
     if (admin.lockedUntil && new Date() < admin.lockedUntil) {
       const remainingMinutes = Math.ceil((admin.lockedUntil - new Date()) / 60000);
       return res.status(423).json({ 
-        error: `Account locked. Try again in ${remainingMinutes} minutes.`
+        error: `Account locked. Try again in ${remainingMinutes} minutes.` 
       });
     }
     
@@ -6220,15 +6227,11 @@ app.post('/api/admin/auth/login', async (req, res) => {
     const isValid = await bcrypt.compare(password, admin.passwordHash);
     
     if (!isValid) {
-      // Increment failed attempts
       admin.failedLoginAttempts += 1;
-      
-      // Lock after 5 failed attempts
       if (admin.failedLoginAttempts >= 5) {
-        admin.lockedUntil = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+        admin.lockedUntil = new Date(Date.now() + 30 * 60 * 1000);
         admin.failedLoginAttempts = 0;
       }
-      
       await admin.save();
       
       await logAdminAction(admin._id, admin.email, 'LOGIN_FAILED', 'AUTH', null, 
@@ -6239,7 +6242,24 @@ app.post('/api/admin/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Reset failed attempts
+    // Check if 2FA is enabled
+    if (admin.twoFactorEnabled) {
+      // Generate temporary token for 2FA verification
+      const twoFactorToken = jwt.sign(
+        { sub: admin._id, email: admin.email, purpose: '2fa' },
+        ADMIN_JWT_SECRET,
+        { expiresIn: '5m' } // 5 minutes to complete 2FA
+      );
+      
+      return res.json({
+        success: true,
+        requiresTwoFactor: true,
+        twoFactorToken: twoFactorToken,
+        message: 'Please enter your 2FA code'
+      });
+    }
+    
+    // Reset failed attempts and complete login
     admin.failedLoginAttempts = 0;
     admin.lockedUntil = null;
     admin.lastLogin = new Date();
@@ -6263,7 +6283,7 @@ app.post('/api/admin/auth/login', async (req, res) => {
       deviceInfo: deviceInfo || 'Unknown',
       ipAddress: req.ip || req.connection.remoteAddress,
       userAgent: req.headers['user-agent'],
-      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000) // 8 hours
+      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000)
     });
     
     await logAdminAction(admin._id, admin.email, 'LOGIN_SUCCESS', 'AUTH', null, 
@@ -6274,7 +6294,7 @@ app.post('/api/admin/auth/login', async (req, res) => {
       success: true,
       accessToken,
       refreshToken,
-      expiresIn: 8 * 60 * 60, // seconds
+      expiresIn: 8 * 60 * 60,
       admin: {
         id: admin._id.toString(),
         email: admin.email,
@@ -6288,6 +6308,110 @@ app.post('/api/admin/auth/login', async (req, res) => {
   } catch (error) {
     console.error('Admin login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// Verify 2FA during login
+app.post('/api/admin/auth/verify-2fa', async (req, res) => {
+  try {
+    const { twoFactorToken, code, isBackupCode } = req.body;
+    
+    if (!twoFactorToken || !code) {
+      return res.status(400).json({ error: 'Token and code are required' });
+    }
+    
+    // Verify the temporary token
+    let decoded;
+    try {
+      decoded = jwt.verify(twoFactorToken, ADMIN_JWT_SECRET);
+      if (decoded.purpose !== '2fa') {
+        return res.status(401).json({ error: 'Invalid token' });
+      }
+    } catch (err) {
+      return res.status(401).json({ error: 'Token expired. Please login again.' });
+    }
+    
+    const admin = await AdminUser.findById(decoded.sub);
+    if (!admin || !admin.twoFactorEnabled) {
+      return res.status(401).json({ error: 'Invalid request' });
+    }
+    
+    let verified = false;
+    
+    if (isBackupCode) {
+      // Check backup codes
+      const backupCode = admin.twoFactorBackupCodes.find(bc => bc.code === code && !bc.used);
+      if (backupCode) {
+        verified = true;
+        backupCode.used = true;
+        await admin.save();
+      }
+    } else {
+      // Verify TOTP code
+      verified = speakeasy.totp.verify({
+        secret: admin.twoFactorSecret,
+        encoding: 'base32',
+        token: code,
+        window: 2
+      });
+    }
+    
+    if (!verified) {
+      await logAdminAction(admin._id, admin.email, '2FA_FAILED', 'AUTH', null, 
+        { isBackupCode }, req, 'FAILED'
+      );
+      return res.status(401).json({ error: 'Invalid code' });
+    }
+    
+    // Complete login
+    admin.failedLoginAttempts = 0;
+    admin.lockedUntil = null;
+    admin.lastLogin = new Date();
+    admin.lastLoginIP = req.ip || req.connection.remoteAddress;
+    await admin.save();
+    
+    // Generate tokens
+    const accessToken = jwt.sign(
+      { sub: admin._id, email: admin.email, role: admin.role },
+      ADMIN_JWT_SECRET,
+      { expiresIn: ADMIN_TOKEN_EXPIRY }
+    );
+    
+    const refreshToken = generateSecureToken();
+    
+    // Create session
+    await AdminSession.create({
+      adminId: admin._id,
+      token: accessToken,
+      refreshToken,
+      deviceInfo: req.body.deviceInfo || 'Unknown',
+      ipAddress: req.ip || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      expiresAt: new Date(Date.now() + 8 * 60 * 60 * 1000)
+    });
+    
+    await logAdminAction(admin._id, admin.email, 'LOGIN_SUCCESS_2FA', 'AUTH', null, 
+      { isBackupCode }, req
+    );
+    
+    res.json({
+      success: true,
+      accessToken,
+      refreshToken,
+      expiresIn: 8 * 60 * 60,
+      admin: {
+        id: admin._id.toString(),
+        email: admin.email,
+        name: admin.name,
+        role: admin.role,
+        permissions: admin.permissions,
+        avatar: admin.avatar
+      }
+    });
+    
+  } catch (error) {
+    console.error('2FA verify login error:', error);
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
@@ -7321,6 +7445,208 @@ app.get('/api/admin/security/2fa', adminAuthRequired, requireAdminPermission('MA
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch 2FA settings' });
+  }
+});
+
+// ========= 2FA AUTHENTICATION ENDPOINTS =========
+
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
+
+// Generate backup codes helper
+function generateBackupCodes(count = 10) {
+  const codes = [];
+  for (let i = 0; i < count; i++) {
+    codes.push(Math.random().toString(36).substring(2, 6).toUpperCase() + '-' + 
+               Math.random().toString(36).substring(2, 6).toUpperCase());
+  }
+  return codes;
+}
+
+// Setup 2FA - Generate secret and QR code
+app.post('/api/admin/security/2fa/setup', adminAuthRequired, async (req, res) => {
+  try {
+    const admin = await AdminUser.findById(req.adminId);
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    if (admin.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is already enabled' });
+    }
+    
+    // Generate secret
+    const secret = speakeasy.generateSecret({
+      name: `Alarmind Admin (${admin.email})`,
+      issuer: 'Alarmind'
+    });
+    
+    // Store temporary secret (not enabled yet)
+    admin.twoFactorTempSecret = secret.base32;
+    await admin.save();
+    
+    // Generate QR code
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    
+    res.json({
+      success: true,
+      secret: secret.base32,
+      qrCodeUrl: qrCodeUrl,
+      otpauthUrl: secret.otpauth_url
+    });
+  } catch (error) {
+    console.error('2FA setup error:', error);
+    res.status(500).json({ error: 'Failed to setup 2FA' });
+  }
+});
+
+// Verify and Enable 2FA
+app.post('/api/admin/security/2fa/verify', adminAuthRequired, async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Valid 6-digit code required' });
+    }
+    
+    const admin = await AdminUser.findById(req.adminId);
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    if (!admin.twoFactorTempSecret) {
+      return res.status(400).json({ error: 'Please setup 2FA first' });
+    }
+    
+    // Verify the code
+    const verified = speakeasy.totp.verify({
+      secret: admin.twoFactorTempSecret,
+      encoding: 'base32',
+      token: code,
+      window: 2 // Allow 2 intervals tolerance
+    });
+    
+    if (!verified) {
+      return res.status(401).json({ error: 'Invalid code' });
+    }
+    
+    // Generate backup codes
+    const backupCodes = generateBackupCodes(10);
+    const hashedBackupCodes = backupCodes.map(c => ({ code: c, used: false }));
+    
+    // Enable 2FA
+    admin.twoFactorEnabled = true;
+    admin.twoFactorSecret = admin.twoFactorTempSecret;
+    admin.twoFactorTempSecret = undefined;
+    admin.twoFactorBackupCodes = hashedBackupCodes;
+    await admin.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'ENABLE_2FA', 'AUTH', null, {}, req);
+    
+    res.json({
+      success: true,
+      message: '2FA enabled successfully',
+      backupCodes: backupCodes
+    });
+  } catch (error) {
+    console.error('2FA verify error:', error);
+    res.status(500).json({ error: 'Failed to verify 2FA' });
+  }
+});
+
+// Disable 2FA
+app.post('/api/admin/security/2fa/disable', adminAuthRequired, async (req, res) => {
+  try {
+    const { code, isBackupCode } = req.body;
+    
+    if (!code) {
+      return res.status(400).json({ error: 'Code required' });
+    }
+    
+    const admin = await AdminUser.findById(req.adminId);
+    if (!admin) {
+      return res.status(404).json({ error: 'Admin not found' });
+    }
+    
+    if (!admin.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    
+    let verified = false;
+    
+    if (isBackupCode) {
+      // Check backup codes
+      const backupCode = admin.twoFactorBackupCodes.find(bc => bc.code === code && !bc.used);
+      if (backupCode) {
+        verified = true;
+        backupCode.used = true;
+      }
+    } else {
+      // Verify TOTP code
+      verified = speakeasy.totp.verify({
+        secret: admin.twoFactorSecret,
+        encoding: 'base32',
+        token: code,
+        window: 2
+      });
+    }
+    
+    if (!verified) {
+      return res.status(401).json({ error: 'Invalid code' });
+    }
+    
+    // Disable 2FA
+    admin.twoFactorEnabled = false;
+    admin.twoFactorSecret = undefined;
+    admin.twoFactorBackupCodes = [];
+    await admin.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'DISABLE_2FA', 'AUTH', null, {}, req);
+    
+    res.json({ success: true, message: '2FA disabled' });
+  } catch (error) {
+    console.error('2FA disable error:', error);
+    res.status(500).json({ error: 'Failed to disable 2FA' });
+  }
+});
+
+// Regenerate Backup Codes
+app.post('/api/admin/security/2fa/backup-codes/regenerate', adminAuthRequired, async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Valid 6-digit code required' });
+    }
+    
+    const admin = await AdminUser.findById(req.adminId);
+    if (!admin || !admin.twoFactorEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    
+    // Verify TOTP code
+    const verified = speakeasy.totp.verify({
+      secret: admin.twoFactorSecret,
+      encoding: 'base32',
+      token: code,
+      window: 2
+    });
+    
+    if (!verified) {
+      return res.status(401).json({ error: 'Invalid code' });
+    }
+    
+    // Generate new backup codes
+    const backupCodes = generateBackupCodes(10);
+    admin.twoFactorBackupCodes = backupCodes.map(c => ({ code: c, used: false }));
+    await admin.save();
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'REGENERATE_BACKUP_CODES', 'AUTH', null, {}, req);
+    
+    res.json({ success: true, backupCodes });
+  } catch (error) {
+    console.error('Regenerate backup codes error:', error);
+    res.status(500).json({ error: 'Failed to regenerate backup codes' });
   }
 });
 
