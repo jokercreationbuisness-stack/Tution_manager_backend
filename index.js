@@ -5929,14 +5929,7 @@ app.get('/api/group-classes/:sessionId', authRequired, async (req, res) => {
   }
 });
 
-// ========= CATCH-ALL ROUTE =========
-app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Endpoint not found',
-    path: req.originalUrl,
-    method: req.method
-  });
-});
+
 
 // ========= ADMIN PANEL API ENDPOINTS =========
 
@@ -6904,6 +6897,15 @@ app.post('/api/admin/setup/initial', async (req, res) => {
     console.error('Initial setup error:', error);
     res.status(500).json({ error: 'Setup failed' });
   }
+});
+
+// ========= CATCH-ALL ROUTE =========
+app.use('*', (req, res) => {
+  res.status(404).json({ 
+    error: 'Endpoint not found',
+    path: req.originalUrl,
+    method: req.method
+  });
 });
 
 // ========= ERROR HANDLER =========
