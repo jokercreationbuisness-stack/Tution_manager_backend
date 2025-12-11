@@ -7485,8 +7485,15 @@ app.post('/api/admin/security/2fa/setup', adminAuthRequired, async (req, res) =>
     admin.twoFactorTempSecret = secret.base32;
     await admin.save();
     
-    // Generate QR code
-    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    // ===== REPLACE FROM HERE =====
+    // Generate QR code with error handling
+    let qrCodeUrl;
+    try {
+      qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    } catch (qrError) {
+      console.error('QR code generation failed:', qrError);
+      qrCodeUrl = null;
+    }
     
     res.json({
       success: true,
@@ -7494,6 +7501,8 @@ app.post('/api/admin/security/2fa/setup', adminAuthRequired, async (req, res) =>
       qrCodeUrl: qrCodeUrl,
       otpauthUrl: secret.otpauth_url
     });
+    // ===== TO HERE =====
+    
   } catch (error) {
     console.error('2FA setup error:', error);
     res.status(500).json({ error: 'Failed to setup 2FA' });
