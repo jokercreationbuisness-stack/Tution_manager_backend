@@ -6360,6 +6360,27 @@ app.post('/api/admin/auth/logout-all', adminAuthRequired, async (req, res) => {
   }
 });
 
+// ========= ADD THIS - Logout from all sessions =========
+app.post('/api/admin/logout-all', adminAuthRequired, async (req, res) => {
+  try {
+    // Delete all sessions for this admin
+    const deletedCount = await AdminSession.deleteMany({ adminId: req.adminId });
+    
+    await logAdminAction(req.adminId, req.adminEmail, 'LOGOUT_ALL_SESSIONS', 'AUTH', null, 
+      { sessionsTerminated: deletedCount.deletedCount }, req
+    );
+    
+    res.json({ 
+      success: true, 
+      message: 'All sessions terminated',
+      sessionsTerminated: deletedCount.deletedCount
+    });
+  } catch (error) {
+    console.error('Logout all error:', error);
+    res.status(500).json({ error: 'Failed to logout all sessions' });
+  }
+});
+
 // Get Current Admin
 app.get('/api/admin/auth/me', adminAuthRequired, async (req, res) => {
   try {
@@ -6521,52 +6542,46 @@ app.get('/api/admin/dashboard/stats', adminAuthRequired, requireAdminPermission(
 });
 
 // User Growth Data
+// ========= ADD THIS - User Growth Data =========
 app.get('/api/admin/dashboard/user-growth', adminAuthRequired, requireAdminPermission('VIEW_DASHBOARD'), async (req, res) => {
   try {
-    const { period = '30d' } = req.query;
+    const { period = '30' } = req.query; // days
+    const daysAgo = parseInt(period);
+    const startDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
     
-    let days = 30;
-    if (period === '7d') days = 7;
-    else if (period === '90d') days = 90;
-    else if (period === '365d') days = 365;
-    
-    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    
-    const growthData = await User.aggregate([
-      {
-        $match: { createdAt: { $gte: startDate } }
-      },
+    // Get daily user registrations
+    const growth = await User.aggregate([
+      { $match: { createdAt: { $gte: startDate } } },
       {
         $group: {
           _id: {
-            $dateToString: { format: '%Y-%m-%d', date: '$createdAt' }
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' }
           },
-          teachers: {
-            $sum: { $cond: [{ $eq: ['$role', 'TEACHER'] }, 1, 0] }
-          },
-          students: {
-            $sum: { $cond: [{ $eq: ['$role', 'STUDENT'] }, 1, 0] }
-          },
+          teachers: { $sum: { $cond: [{ $eq: ['$role', 'TEACHER'] }, 1, 0] } },
+          students: { $sum: { $cond: [{ $eq: ['$role', 'STUDENT'] }, 1, 0] } },
           total: { $sum: 1 }
         }
       },
-      {
-        $sort: { _id: 1 }
-      }
+      { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } }
     ]);
     
-    res.json({
-      success: true,
-      data: growthData.map(d => ({
-        date: d._id,
-        teachers: d.teachers,
-        students: d.students,
-        total: d.total
-      }))
+    const formatted = growth.map(g => ({
+      date: `${g._id.year}-${String(g._id.month).padStart(2, '0')}-${String(g._id.day).padStart(2, '0')}`,
+      teachers: g.teachers,
+      students: g.students,
+      total: g.total
+    }));
+    
+    res.json({ 
+      success: true, 
+      growth: formatted, 
+      period: daysAgo 
     });
   } catch (error) {
     console.error('User growth error:', error);
-    res.status(500).json({ error: 'Failed to fetch user growth data' });
+    res.status(500).json({ error: 'Failed to fetch growth data' });
   }
 });
 
