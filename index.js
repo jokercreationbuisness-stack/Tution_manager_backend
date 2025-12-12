@@ -13,6 +13,12 @@ const socketIo = require('socket.io');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+// Add this after your existing requires
+const crypto = require('crypto');
+
+// Jitsi JWT Configuration - Add these environment variables or use defaults
+const JITSI_APP_ID = process.env.JITSI_APP_ID || 'tuition_manager_app';
+const JITSI_APP_SECRET = process.env.JITSI_APP_SECRET || 'your_jitsi_app_secret_key_2024';
 
 const app = express();
 const server = http.createServer(app);
@@ -1002,6 +1008,80 @@ async function getBlockedUserIds(userId) {
     return [];
   }
 }
+
+// ========= JITSI JWT HELPER FUNCTIONS =========
+const generateJitsiJWT = (roomName, userName, userId, isModerator = false, avatarUrl = null) => {
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    
+    const header = {
+      alg: 'HS256',
+      typ: 'JWT'
+    };
+    
+    const payload = {
+      iss: JITSI_APP_ID,
+      aud: 'jitsi',
+      exp: now + (2 * 60 * 60), // 2 hours from now
+      nbf: now - 10, // 10 seconds ago
+      iat: now,
+      room: roomName,
+      sub: JITSI_APP_ID,
+      context: {
+        user: {
+          id: userId,
+          name: userName,
+          avatar: avatarUrl,
+          moderator: isModerator,
+          email: `${userId}@tuitionmanager.app`
+        },
+        features: {
+          livestreaming: isModerator,
+          recording: isModerator,
+          transcription: false,
+          "outbound-call": false,
+          "sip-outbound-call": false,
+          "sip-inbound-call": false,
+          lobby: false // Disable lobby
+        }
+      }
+    };
+    
+    // If moderator, add additional permissions
+    if (isModerator) {
+      payload.moderator = true;
+      payload.context.user.affiliation = 'owner';
+      payload.context.features['kick-out'] = true;
+      payload.context.features['mute-everyone'] = true;
+      payload.context.features['toggle-lobby'] = true;
+    }
+    
+    const base64UrlEncode = (obj) => {
+      return Buffer.from(JSON.stringify(obj))
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '');
+    };
+    
+    const encodedHeader = base64UrlEncode(header);
+    const encodedPayload = base64UrlEncode(payload);
+    const data = `${encodedHeader}.${encodedPayload}`;
+    
+    const signature = crypto
+      .createHmac('sha256', JITSI_APP_SECRET)
+      .update(data)
+      .digest('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+    
+    return `${data}.${signature}`;
+  } catch (error) {
+    console.error('JWT generation error:', error);
+    return null;
+  }
+};
 
 // ========= ADMIN HELPER FUNCTIONS =========
 
@@ -10650,6 +10730,116 @@ app.get('/api/jitsi/rooms/:roomId/participants', authRequired, async (req, res) 
     res.json({ success: true, participants });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch participants' });
+  }
+});
+
+// Generate Jitsi JWT token
+app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
+  try {
+    const { roomId, roomName } = req.body;
+    
+    if (!roomId || !roomName) {
+      return res.status(400).json({ error: 'Room ID and name are required' });
+    }
+    
+    // Get user details
+    const user = await User.findById(req.userId).select('name avatar');
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const isModerator = req.role === 'TEACHER';
+    
+    // For teachers, verify they own the room
+    if (isModerator) {
+      const room = await JitsiRoom.findOne({ roomId, teacherId: req.userId });
+      if (!room) {
+        return res.status(403).json({ error: 'Room not found or access denied' });
+      }
+    } else {
+      // For students, verify they're enrolled
+      const enrollment = await JitsiEnrollment.findOne({
+        roomId,
+        userId: req.userId,
+        kicked: false
+      });
+      
+      if (!enrollment) {
+        return res.status(403).json({ error: 'Not enrolled in this room' });
+      }
+    }
+    
+    const token = generateJitsiJWT(
+      roomId,
+      user.name,
+      req.userId,
+      isModerator,
+      user.avatar
+    );
+    
+    if (!token) {
+      return res.status(500).json({ error: 'Failed to generate token' });
+    }
+    
+    console.log(`🔑 Generated Jitsi JWT for ${user.name} (${req.role}) in room ${roomId}`);
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        name: user.name,
+        avatar: user.avatar,
+        isModerator
+      },
+      room: {
+        roomId,
+        roomName
+      }
+    });
+  } catch (error) {
+    console.error('Generate Jitsi token error:', error);
+    res.status(500).json({ error: 'Failed to generate token' });
+  }
+});
+
+// Get Jitsi configuration for room
+app.get('/api/jitsi/rooms/:roomId/config', authRequired, async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Check access
+    const isModerator = req.role === 'TEACHER' && room.teacherId.toString() === req.userId;
+    
+    if (!isModerator) {
+      const enrollment = await JitsiEnrollment.findOne({
+        roomId: req.params.roomId,
+        userId: req.userId,
+        kicked: false
+      });
+      
+      if (!enrollment) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+    
+    res.json({
+      success: true,
+      config: {
+        roomId: room.roomId,
+        roomName: room.roomName,
+        jitsiDomain: room.jitsiDomain || 'meet.jit.si',
+        settings: room.settings,
+        isActive: room.isActive,
+        isModerator,
+        appId: JITSI_APP_ID // Send app ID to client
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get room config' });
   }
 });
 
