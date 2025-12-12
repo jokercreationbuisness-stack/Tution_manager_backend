@@ -10734,6 +10734,7 @@ app.get('/api/jitsi/rooms/:roomId/participants', authRequired, async (req, res) 
 });
 
 // Generate Jitsi JWT token
+// Generate Jitsi JWT token - MODIFIED
 app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
   try {
     const { roomId, roomName } = req.body;
@@ -10742,7 +10743,6 @@ app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Room ID and name are required' });
     }
     
-    // Get user details
     const user = await User.findById(req.userId).select('name avatar');
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -10750,14 +10750,30 @@ app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
     
     const isModerator = req.role === 'TEACHER';
     
-    // For teachers, verify they own the room
     if (isModerator) {
-      const room = await JitsiRoom.findOne({ roomId, teacherId: req.userId });
+      // Auto-create room if it doesn't exist for teachers
+      let room = await JitsiRoom.findOne({ roomId, teacherId: req.userId });
       if (!room) {
-        return res.status(403).json({ error: 'Room not found or access denied' });
+        room = await JitsiRoom.create({
+          roomId,
+          roomName,
+          teacherId: req.userId,
+          isActive: true,
+          startedAt: new Date(),
+          jitsiDomain: 'meet.jit.si'
+        });
+        
+        // Auto-enroll teacher
+        await JitsiEnrollment.findOneAndUpdate(
+          { roomId, userId: req.userId },
+          { roomId, userId: req.userId, role: 'TEACHER' },
+          { upsert: true }
+        );
+        
+        console.log(`🎥 Auto-created Jitsi room: ${roomId}`);
       }
     } else {
-      // For students, verify they're enrolled
+      // Students still need enrollment
       const enrollment = await JitsiEnrollment.findOne({
         roomId,
         userId: req.userId,
@@ -10769,13 +10785,7 @@ app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
       }
     }
     
-    const token = generateJitsiJWT(
-      roomId,
-      user.name,
-      req.userId,
-      isModerator,
-      user.avatar
-    );
+    const token = generateJitsiJWT(roomId, user.name, req.userId, isModerator, user.avatar);
     
     if (!token) {
       return res.status(500).json({ error: 'Failed to generate token' });
@@ -10786,15 +10796,8 @@ app.post('/api/jitsi/generate-token', authRequired, async (req, res) => {
     res.json({
       success: true,
       token,
-      user: {
-        name: user.name,
-        avatar: user.avatar,
-        isModerator
-      },
-      room: {
-        roomId,
-        roomName
-      }
+      user: { name: user.name, avatar: user.avatar, isModerator },
+      room: { roomId, roomName }
     });
   } catch (error) {
     console.error('Generate Jitsi token error:', error);
