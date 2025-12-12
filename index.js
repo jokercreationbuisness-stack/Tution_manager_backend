@@ -411,9 +411,9 @@ const GroupClassSchema = new Schema({
   notes: { type: String },
   // Waiting room
   waitingRoom: [{
-    oderId: { type: Types.ObjectId, ref: 'User' },
+    userId: { type: Types.ObjectId, ref: 'User' },
     joinedAt: { type: Date, default: Date.now }
-  }],
+}],
   // Join timing (minutes before scheduled time when join is allowed)
   joinWindowMinutes: { type: Number, default: 10 },
   isActive: { type: Boolean, default: true },
@@ -512,7 +512,7 @@ JitsiEnrollmentSchema.index({ roomId: 1, oderId: 1 }, { unique: true });
 // Jitsi Attendance Schema - Track join/leave with timestamps
 const JitsiAttendanceSchema = new Schema({
   roomId: { type: String, required: true, index: true },
-  oderId: { type: Types.ObjectId, ref: 'User', required: true },
+  userId: { type: Types.ObjectId, ref: 'User', required: true },  // ← Fix here
   userName: { type: String },
   role: { type: String, enum: ['TEACHER', 'STUDENT'], required: true },
   sessions: [{
@@ -527,7 +527,7 @@ const JitsiAttendanceSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
-JitsiAttendanceSchema.index({ roomId: 1, oderId: 1 }, { unique: true });
+JitsiEnrollmentSchema.index({ roomId: 1, userId: 1 }, { unique: true });
 
 // ========= JITSI MODELS =========
 const JitsiRoom = mongoose.model('JitsiRoom', JitsiRoomSchema);
