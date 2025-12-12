@@ -453,6 +453,77 @@ const WhiteboardDataSchema = new Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// ========= JITSI GROUP CALL SCHEMAS =========
+
+// Jitsi Room Schema - Teacher creates rooms
+const JitsiRoomSchema = new Schema({
+  roomId: { type: String, required: true, unique: true }, // Unique Jitsi room identifier
+  roomName: { type: String, required: true },
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
+  settings: {
+    allowMicStudents: { type: Boolean, default: true },
+    allowCameraStudents: { type: Boolean, default: true },
+    allowScreenShareStudents: { type: Boolean, default: false },
+    allowChat: { type: Boolean, default: true },
+    allowRaiseHand: { type: Boolean, default: true },
+    muteAllOnJoin: { type: Boolean, default: false }
+  },
+  isActive: { type: Boolean, default: false }, // Room is live when true
+  scheduledAt: { type: Date },
+  startedAt: { type: Date },
+  endedAt: { type: Date },
+  maxParticipants: { type: Number, default: 50 },
+  sectionId: { type: Types.ObjectId, ref: 'Section' },
+  studentIds: [{ type: Types.ObjectId, ref: 'User' }], // Specific students allowed
+  isForAllStudents: { type: Boolean, default: false },
+  jitsiDomain: { type: String, default: 'meet.jit.si' }, // Can be custom Jitsi server
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+JitsiRoomSchema.index({ teacherId: 1, isActive: 1 });
+JitsiRoomSchema.index({ roomId: 1 });
+
+// Jitsi Enrollment Schema - Track who can join and kick status
+const JitsiEnrollmentSchema = new Schema({
+  roomId: { type: String, required: true, index: true },
+  
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  role: { type: String, enum: ['TEACHER', 'STUDENT'], required: true },
+  kicked: { type: Boolean, default: false },
+  kickedAt: { type: Date },
+  kickedBy: { type: Types.ObjectId, ref: 'User' },
+  kickReason: { type: String },
+  mutedByHost: { type: Boolean, default: false },
+  videoDisabledByHost: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+JitsiEnrollmentSchema.index({ roomId: 1, oderId: 1 }, { unique: true });
+
+// Jitsi Attendance Schema - Track join/leave with timestamps
+const JitsiAttendanceSchema = new Schema({
+  roomId: { type: String, required: true, index: true },
+  oderId: { type: Types.ObjectId, ref: 'User', required: true },
+  userName: { type: String },
+  role: { type: String, enum: ['TEACHER', 'STUDENT'], required: true },
+  sessions: [{
+    joinTime: { type: Date, required: true },
+    leaveTime: { type: Date },
+    duration: { type: Number, default: 0 } // Duration in seconds
+  }],
+  firstJoin: { type: Date },
+  lastLeave: { type: Date },
+  totalDuration: { type: Number, default: 0 }, // Total seconds across all sessions
+  joinCount: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+JitsiAttendanceSchema.index({ roomId: 1, oderId: 1 }, { unique: true });
+
+// ========= JITSI MODELS =========
+const JitsiRoom = mongoose.model('JitsiRoom', JitsiRoomSchema);
+const JitsiEnrollment = mongoose.model('JitsiEnrollment', JitsiEnrollmentSchema);
+const JitsiAttendance = mongoose.model('JitsiAttendance', JitsiAttendanceSchema);
+
 // ========= GAME SCHEMAS (ADD AFTER UserBlockSchema) =========
 
 // User XP Tracking
@@ -1567,6 +1638,325 @@ socket.on('mark_all_read', async (data) => {
       conversationId, 
       userId: socket.userId 
     });
+  });
+
+    // ========= JITSI GROUP CALL SOCKET EVENTS =========
+  
+  // Join Jitsi room (Socket room for real-time updates)
+  socket.on('jitsi-join-room', async (data) => {
+    try {
+      const { roomId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      if (!socket.userId) {
+        socket.emit('jitsi-error', { error: 'Not authenticated' });
+        return;
+      }
+      
+      // Check enrollment and kick status
+      const enrollment = await JitsiEnrollment.findOne({
+        roomId,
+        userId: socket.userId
+      });
+      
+      if (!enrollment) {
+        socket.emit('jitsi-error', { error: 'Not enrolled in this class' });
+        return;
+      }
+      
+      if (enrollment.kicked) {
+        socket.emit('jitsi-kicked', { 
+          roomId, 
+          reason: enrollment.kickReason || 'You have been removed from this class' 
+        });
+        return;
+      }
+      
+      const room = await JitsiRoom.findOne({ roomId });
+      if (!room || !room.isActive) {
+        socket.emit('jitsi-error', { error: 'Class is not active' });
+        return;
+      }
+      
+      // Join socket room for real-time updates
+      socket.join(`jitsi-${roomId}`);
+      
+      // Get user info
+      const user = await User.findById(socket.userId).select('name avatar');
+      
+      // Record attendance - join
+      let attendance = await JitsiAttendance.findOne({ roomId, userId: socket.userId });
+      
+      if (!attendance) {
+        attendance = await JitsiAttendance.create({
+          roomId,
+          oderId: socket.userId,
+          userName: user?.name,
+          role: enrollment.role,
+          sessions: [{ joinTime: new Date() }],
+          firstJoin: new Date(),
+          joinCount: 1
+        });
+      } else {
+        // Add new session
+        attendance.sessions.push({ joinTime: new Date() });
+        attendance.joinCount += 1;
+        attendance.updatedAt = new Date();
+        await attendance.save();
+      }
+      
+      console.log(`🎥 User ${socket.userId} joined Jitsi room ${roomId}`);
+      
+      // Notify others in the room
+      socket.to(`jitsi-${roomId}`).emit('jitsi-participant-joined', {
+        oderId: socket.userId,
+        name: user?.name,
+        avatar: user?.avatar,
+        role: enrollment.role
+      });
+      
+      // Send current settings and enrollment status
+      socket.emit('jitsi-joined', {
+        roomId,
+        settings: room.settings,
+        mutedByHost: enrollment.mutedByHost,
+        videoDisabledByHost: enrollment.videoDisabledByHost
+      });
+    } catch (error) {
+      console.error('Jitsi join room error:', error);
+      socket.emit('jitsi-error', { error: 'Failed to join room' });
+    }
+  });
+  
+  // Leave Jitsi room
+  socket.on('jitsi-leave-room', async (data) => {
+    try {
+      const { roomId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      if (!socket.userId) return;
+      
+      // Record attendance - leave
+      const attendance = await JitsiAttendance.findOne({ roomId, userId: socket.userId });
+      
+      if (attendance && attendance.sessions.length > 0) {
+        const lastSession = attendance.sessions[attendance.sessions.length - 1];
+        if (!lastSession.leaveTime) {
+          lastSession.leaveTime = new Date();
+          lastSession.duration = Math.floor((lastSession.leaveTime - lastSession.joinTime) / 1000);
+          attendance.lastLeave = new Date();
+          attendance.totalDuration = attendance.sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+          attendance.updatedAt = new Date();
+          await attendance.save();
+        }
+      }
+      
+      socket.leave(`jitsi-${roomId}`);
+      
+      console.log(`🎥 User ${socket.userId} left Jitsi room ${roomId}`);
+      
+      // Notify others
+      socket.to(`jitsi-${roomId}`).emit('jitsi-participant-left', {
+        userId: socket.userId
+      });
+    } catch (error) {
+      console.error('Jitsi leave room error:', error);
+    }
+  });
+  
+  // Teacher updates settings during meeting
+  socket.on('jitsi-update-settings', async (data) => {
+    try {
+      const { roomId, settings } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      if (!socket.userId) return;
+      
+      // Verify teacher
+      const room = await JitsiRoom.findOne({ roomId, teacherId: socket.userId });
+      if (!room) {
+        socket.emit('jitsi-error', { error: 'Only teacher can update settings' });
+        return;
+      }
+      
+      room.settings = { ...room.settings, ...settings };
+      room.updatedAt = new Date();
+      await room.save();
+      
+      // Broadcast to all in room
+      io.to(`jitsi-${roomId}`).emit('jitsi-settings-update', {
+        roomId,
+        settings: room.settings
+      });
+      
+      console.log(`⚙️ Settings updated for room ${roomId}`);
+    } catch (error) {
+      console.error('Update settings error:', error);
+    }
+  });
+  
+  // Teacher mutes all students
+  socket.on('jitsi-mute-all-students', async (data) => {
+    try {
+      const { roomId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      const room = await JitsiRoom.findOne({ roomId, teacherId: socket.userId });
+      if (!room) return;
+      
+      await JitsiEnrollment.updateMany(
+        { roomId, role: 'STUDENT' },
+        { mutedByHost: true }
+      );
+      
+      // Update settings to prevent unmuting
+      room.settings.allowMicStudents = false;
+      await room.save();
+      
+      io.to(`jitsi-${roomId}`).emit('jitsi-mute-all', { roomId });
+      io.to(`jitsi-${roomId}`).emit('jitsi-settings-update', { roomId, settings: room.settings });
+      
+      console.log(`🔇 All students muted in room ${roomId}`);
+    } catch (error) {
+      console.error('Mute all error:', error);
+    }
+  });
+  
+  // Teacher mutes specific student
+  socket.on('jitsi-mute-student', async (data) => {
+    try {
+      const { roomId, targetUserId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      const room = await JitsiRoom.findOne({ roomId, teacherId: socket.userId });
+      if (!room) return;
+      
+      await JitsiEnrollment.findOneAndUpdate(
+        { roomId, userId: targetUserId },
+        { mutedByHost: true }
+      );
+      
+      io.to(targetUserId).emit('jitsi-mute-user', { roomId, userId: targetUserId });
+      
+      console.log(`🔇 Student ${targetUserId} muted in room ${roomId}`);
+    } catch (error) {
+      console.error('Mute student error:', error);
+    }
+  });
+  
+  // Teacher disables video for student
+  socket.on('jitsi-disable-student-video', async (data) => {
+    try {
+      const { roomId, targetUserId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      const room = await JitsiRoom.findOne({ roomId, teacherId: socket.userId });
+      if (!room) return;
+      
+      await JitsiEnrollment.findOneAndUpdate(
+        { roomId, userId: targetUserId },
+        { videoDisabledByHost: true }
+      );
+      
+      io.to(targetUserId).emit('jitsi-disable-video', { roomId, userId: targetUserId });
+    } catch (error) {
+      console.error('Disable video error:', error);
+    }
+  });
+  
+  // Teacher kicks student
+  socket.on('jitsi-kick-student', async (data) => {
+    try {
+      const { roomId, targetUserId, reason } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      const room = await JitsiRoom.findOne({ roomId, teacherId: socket.userId });
+      if (!room) return;
+      
+      await JitsiEnrollment.findOneAndUpdate(
+        { roomId, userId: targetUserId },
+        { 
+          kicked: true, 
+          kickedAt: new Date(),
+          kickedBy: socket.userId,
+          kickReason: reason || 'Removed by teacher'
+        }
+      );
+      
+      // Close attendance session
+      const attendance = await JitsiAttendance.findOne({ roomId, userId: targetUserId });
+      if (attendance) {
+        const lastSession = attendance.sessions[attendance.sessions.length - 1];
+        if (lastSession && !lastSession.leaveTime) {
+          lastSession.leaveTime = new Date();
+          lastSession.duration = Math.floor((lastSession.leaveTime - lastSession.joinTime) / 1000);
+          attendance.lastLeave = new Date();
+          attendance.totalDuration = attendance.sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+          await attendance.save();
+        }
+      }
+      
+      io.to(targetUserId).emit('jitsi-kicked', { 
+        roomId, 
+        userId: targetUserId,
+        reason: reason || 'You have been removed from the class'
+      });
+      
+      // Notify others
+      io.to(`jitsi-${roomId}`).emit('jitsi-participant-left', { userId: targetUserId });
+      
+      console.log(`👢 Student ${targetUserId} kicked from room ${roomId}`);
+    } catch (error) {
+      console.error('Kick student error:', error);
+    }
+  });
+  
+  // Student attempts to unmute (for validation)
+  socket.on('jitsi-unmute-attempt', async (data) => {
+    try {
+      const { roomId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      const room = await JitsiRoom.findOne({ roomId });
+      const enrollment = await JitsiEnrollment.findOne({ roomId, userId: socket.userId });
+      
+      if (!room || !enrollment) return;
+      
+      // Check if student can unmute
+      if (enrollment.role === 'STUDENT') {
+        if (!room.settings.allowMicStudents || enrollment.mutedByHost) {
+          // Force re-mute
+          socket.emit('jitsi-force-mute', { roomId, reason: 'Microphone is disabled by teacher' });
+        }
+      }
+    } catch (error) {
+      console.error('Unmute attempt error:', error);
+    }
+  });
+  
+  // Handle disconnect - close attendance session
+  socket.on('disconnect', async () => {
+    // ... existing disconnect logic ...
+    
+    // Close any open Jitsi attendance sessions
+    if (socket.userId) {
+      try {
+        const openAttendances = await JitsiAttendance.find({
+          userId: socket.userId,
+          'sessions.leaveTime': null
+        });
+        
+        for (const attendance of openAttendances) {
+          const lastSession = attendance.sessions[attendance.sessions.length - 1];
+          if (lastSession && !lastSession.leaveTime) {
+            lastSession.leaveTime = new Date();
+            lastSession.duration = Math.floor((lastSession.leaveTime - lastSession.joinTime) / 1000);
+            attendance.lastLeave = new Date();
+            attendance.totalDuration = attendance.sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+            await attendance.save();
+            
+            // Notify room
+            io.to(`jitsi-${attendance.roomId}`).emit('jitsi-participant-left', {
+              userId: socket.userId
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Error closing Jitsi sessions on disconnect:', error);
+      }
+    }
   });
 
   // ========= WEBRTC SIGNALING FOR VOICE/VIDEO CALLS =========
@@ -9463,6 +9853,549 @@ app.post('/api/admin/setup/initial', async (req, res) => {
   } catch (error) {
     console.error('Initial setup error:', error);
     res.status(500).json({ error: 'Setup failed' });
+  }
+});
+
+// ========================================
+// ========= JITSI GROUP CALL APIs =========
+// ========================================
+
+// Generate unique room ID
+const generateJitsiRoomId = () => {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let roomId = 'tm_'; // TuitionManager prefix
+  for (let i = 0; i < 12; i++) {
+    roomId += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return roomId;
+};
+
+// Create Jitsi Room (Teacher only)
+app.post('/api/jitsi/rooms', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { roomName, settings, scheduledAt, sectionId, studentIds, isForAllStudents, jitsiDomain } = req.body;
+    
+    if (!roomName) {
+      return res.status(400).json({ error: 'Room name is required' });
+    }
+    
+    const roomId = generateJitsiRoomId();
+    
+    const room = await JitsiRoom.create({
+      roomId,
+      roomName,
+      teacherId: req.userId,
+      settings: settings || {},
+      scheduledAt: scheduledAt ? new Date(scheduledAt) : null,
+      sectionId,
+      studentIds: studentIds || [],
+      isForAllStudents: isForAllStudents || false,
+      jitsiDomain: jitsiDomain || 'meet.jit.si'
+    });
+    
+    // Create teacher enrollment
+    await JitsiEnrollment.create({
+      roomId,
+      userId: req.userId,
+      role: 'TEACHER'
+    });
+    
+    // If specific students, create their enrollments
+    if (studentIds && studentIds.length > 0) {
+      const enrollments = studentIds.map(studentId => ({
+        roomId,
+        userId: studentId,
+        role: 'STUDENT'
+      }));
+      await JitsiEnrollment.insertMany(enrollments, { ordered: false }).catch(() => {});
+    }
+    
+    // If for all students, enroll all linked students
+    if (isForAllStudents) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      const enrollments = links.map(link => ({
+        roomId,
+        userId: link.studentId,
+        role: 'STUDENT'
+      }));
+      await JitsiEnrollment.insertMany(enrollments, { ordered: false }).catch(() => {});
+    }
+    
+    res.status(201).json({
+      success: true,
+      room: {
+        id: room._id.toString(),
+        roomId: room.roomId,
+        roomName: room.roomName,
+        settings: room.settings,
+        isActive: room.isActive,
+        jitsiDomain: room.jitsiDomain,
+        scheduledAt: room.scheduledAt,
+        createdAt: room.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Create Jitsi room error:', error);
+    res.status(500).json({ error: 'Failed to create room' });
+  }
+});
+
+// Get my Jitsi rooms (Teacher)
+app.get('/api/jitsi/rooms', authRequired, async (req, res) => {
+  try {
+    let rooms;
+    
+    if (req.role === 'TEACHER') {
+      rooms = await JitsiRoom.find({ teacherId: req.userId })
+        .sort({ createdAt: -1 })
+        .lean();
+    } else {
+      // Student: get rooms they're enrolled in
+      const enrollments = await JitsiEnrollment.find({ 
+        userId: req.userId, 
+        kicked: false 
+      }).select('roomId');
+      
+      const roomIds = enrollments.map(e => e.roomId);
+      rooms = await JitsiRoom.find({ roomId: { $in: roomIds } })
+        .populate('teacherId', 'name')
+        .sort({ createdAt: -1 })
+        .lean();
+    }
+    
+    res.json({
+      success: true,
+      rooms: rooms.map(r => ({
+        id: r._id.toString(),
+        roomId: r.roomId,
+        roomName: r.roomName,
+        teacherName: r.teacherId?.name || 'Unknown',
+        settings: r.settings,
+        isActive: r.isActive,
+        scheduledAt: r.scheduledAt,
+        jitsiDomain: r.jitsiDomain,
+        createdAt: r.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Get Jitsi rooms error:', error);
+    res.status(500).json({ error: 'Failed to fetch rooms' });
+  }
+});
+
+// Get active rooms for student
+app.get('/api/jitsi/rooms/active', authRequired, async (req, res) => {
+  try {
+    const enrollments = await JitsiEnrollment.find({ 
+      userId: req.userId, 
+      kicked: false 
+    }).select('roomId');
+    
+    const roomIds = enrollments.map(e => e.roomId);
+    
+    const activeRooms = await JitsiRoom.find({ 
+      roomId: { $in: roomIds },
+      isActive: true
+    })
+    .populate('teacherId', 'name avatar')
+    .lean();
+    
+    res.json({
+      success: true,
+      rooms: activeRooms.map(r => ({
+        id: r._id.toString(),
+        roomId: r.roomId,
+        roomName: r.roomName,
+        teacherName: r.teacherId?.name,
+        teacherAvatar: r.teacherId?.avatar,
+        settings: r.settings,
+        jitsiDomain: r.jitsiDomain,
+        startedAt: r.startedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch active rooms' });
+  }
+});
+
+// Start class (Teacher only) - Makes room active
+app.post('/api/jitsi/rooms/:roomId/start', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    room.isActive = true;
+    room.startedAt = new Date();
+    room.updatedAt = new Date();
+    await room.save();
+    
+    // Get all enrolled students
+    const enrollments = await JitsiEnrollment.find({ 
+      roomId: req.params.roomId, 
+      role: 'STUDENT',
+      kicked: false 
+    }).select('userId');
+    
+    // Broadcast to all enrolled students via Socket.IO
+    enrollments.forEach(enrollment => {
+      io.to(enrollment.userId.toString()).emit('jitsi-room-started', {
+        roomId: room.roomId,
+        roomName: room.roomName,
+        settings: room.settings,
+        jitsiDomain: room.jitsiDomain
+      });
+    });
+    
+    console.log(`🎥 Jitsi room started: ${room.roomId} by teacher ${req.userId}`);
+    
+    res.json({ success: true, message: 'Class started', startedAt: room.startedAt });
+  } catch (error) {
+    console.error('Start class error:', error);
+    res.status(500).json({ error: 'Failed to start class' });
+  }
+});
+
+// End class (Teacher only)
+app.post('/api/jitsi/rooms/:roomId/end', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    room.isActive = false;
+    room.endedAt = new Date();
+    room.updatedAt = new Date();
+    await room.save();
+    
+    // Close all attendance sessions
+    await JitsiAttendance.updateMany(
+      { roomId: req.params.roomId, 'sessions.leaveTime': null },
+      { 
+        $set: { 
+          'sessions.$.leaveTime': new Date(),
+          lastLeave: new Date()
+        }
+      }
+    );
+    
+    // Recalculate total durations
+    const attendances = await JitsiAttendance.find({ roomId: req.params.roomId });
+    for (const att of attendances) {
+      let totalDuration = 0;
+      for (const session of att.sessions) {
+        if (session.leaveTime && session.joinTime) {
+          const duration = Math.floor((new Date(session.leaveTime) - new Date(session.joinTime)) / 1000);
+          session.duration = duration;
+          totalDuration += duration;
+        }
+      }
+      att.totalDuration = totalDuration;
+      await att.save();
+    }
+    
+    // Broadcast class ended to all participants
+    io.emit('jitsi-room-ended', { roomId: room.roomId });
+    
+    console.log(`🎥 Jitsi room ended: ${room.roomId}`);
+    
+    res.json({ success: true, message: 'Class ended', endedAt: room.endedAt });
+  } catch (error) {
+    console.error('End class error:', error);
+    res.status(500).json({ error: 'Failed to end class' });
+  }
+});
+
+// Update room settings (Teacher only) - During live meeting
+app.put('/api/jitsi/rooms/:roomId/settings', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { settings } = req.body;
+    
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Merge settings
+    room.settings = { ...room.settings, ...settings };
+    room.updatedAt = new Date();
+    await room.save();
+    
+    // Broadcast settings update to all participants in the room
+    io.to(`jitsi-${req.params.roomId}`).emit('jitsi-settings-update', {
+      roomId: room.roomId,
+      settings: room.settings
+    });
+    
+    console.log(`⚙️ Jitsi room settings updated: ${room.roomId}`);
+    
+    res.json({ success: true, settings: room.settings });
+  } catch (error) {
+    console.error('Update settings error:', error);
+    res.status(500).json({ error: 'Failed to update settings' });
+  }
+});
+
+// Mute all students (Teacher only)
+app.post('/api/jitsi/rooms/:roomId/mute-all', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Update all student enrollments
+    await JitsiEnrollment.updateMany(
+      { roomId: req.params.roomId, role: 'STUDENT' },
+      { mutedByHost: true }
+    );
+    
+    // Broadcast mute command
+    io.to(`jitsi-${req.params.roomId}`).emit('jitsi-mute-all', {
+      roomId: room.roomId
+    });
+    
+    res.json({ success: true, message: 'All students muted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to mute all' });
+  }
+});
+
+// Mute specific student
+app.post('/api/jitsi/rooms/:roomId/mute/:userId', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    await JitsiEnrollment.findOneAndUpdate(
+      { roomId: req.params.roomId, userId: req.params.userId },
+      { mutedByHost: true }
+    );
+    
+    // Send mute command to specific user
+    io.to(req.params.userId).emit('jitsi-mute-user', {
+      roomId: room.roomId,
+      userId: req.params.userId
+    });
+    
+    res.json({ success: true, message: 'User muted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to mute user' });
+  }
+});
+
+// Disable video for specific student
+app.post('/api/jitsi/rooms/:roomId/disable-video/:userId', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    await JitsiEnrollment.findOneAndUpdate(
+      { roomId: req.params.roomId, userId: req.params.userId },
+      { videoDisabledByHost: true }
+    );
+    
+    io.to(req.params.userId).emit('jitsi-disable-video', {
+      roomId: room.roomId,
+      userId: req.params.userId
+    });
+    
+    res.json({ success: true, message: 'User video disabled' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to disable video' });
+  }
+});
+
+// Kick student from room
+app.post('/api/jitsi/rooms/:roomId/kick/:userId', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { reason } = req.body;
+    
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Update enrollment
+    await JitsiEnrollment.findOneAndUpdate(
+      { roomId: req.params.roomId, userId: req.params.userId },
+      { 
+        kicked: true, 
+        kickedAt: new Date(), 
+        kickedBy: req.userId,
+        kickReason: reason || 'Removed by teacher'
+      }
+    );
+    
+    // Close attendance session
+    const attendance = await JitsiAttendance.findOne({ 
+      roomId: req.params.roomId, 
+      userId: req.params.userId 
+    });
+    
+    if (attendance) {
+      const lastSession = attendance.sessions[attendance.sessions.length - 1];
+      if (lastSession && !lastSession.leaveTime) {
+        lastSession.leaveTime = new Date();
+        lastSession.duration = Math.floor((lastSession.leaveTime - lastSession.joinTime) / 1000);
+        attendance.lastLeave = new Date();
+        attendance.totalDuration = attendance.sessions.reduce((sum, s) => sum + (s.duration || 0), 0);
+        await attendance.save();
+      }
+    }
+    
+    // Send kick command to user
+    io.to(req.params.userId).emit('jitsi-kicked', {
+      roomId: room.roomId,
+      userId: req.params.userId,
+      reason: reason || 'You have been removed from the class'
+    });
+    
+    console.log(`👢 User ${req.params.userId} kicked from room ${room.roomId}`);
+    
+    res.json({ success: true, message: 'User kicked' });
+  } catch (error) {
+    console.error('Kick user error:', error);
+    res.status(500).json({ error: 'Failed to kick user' });
+  }
+});
+
+// Check if user is kicked (for rejoin prevention)
+app.get('/api/jitsi/rooms/:roomId/check-access', authRequired, async (req, res) => {
+  try {
+    const enrollment = await JitsiEnrollment.findOne({
+      roomId: req.params.roomId,
+      userId: req.userId
+    });
+    
+    if (!enrollment) {
+      return res.status(403).json({ error: 'Not enrolled in this class', canJoin: false });
+    }
+    
+    if (enrollment.kicked) {
+      return res.status(403).json({ 
+        error: 'You have been removed from this class', 
+        canJoin: false,
+        kickReason: enrollment.kickReason
+      });
+    }
+    
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId });
+    
+    res.json({ 
+      success: true, 
+      canJoin: true,
+      isActive: room?.isActive || false,
+      settings: room?.settings,
+      jitsiDomain: room?.jitsiDomain
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to check access' });
+  }
+});
+
+// Get attendance report for a room
+app.get('/api/jitsi/rooms/:roomId/attendance', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId, teacherId: req.userId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    const attendances = await JitsiAttendance.find({ roomId: req.params.roomId })
+      .populate('userId', 'name email avatar studentCode')
+      .lean();
+    
+    const report = attendances.map(att => ({
+      id: att._id.toString(),
+      user: att.userId ? {
+        id: att.userId._id.toString(),
+        name: att.userId.name,
+        email: att.userId.email,
+        avatar: att.userId.avatar,
+        studentCode: att.userId.studentCode
+      } : null,
+      role: att.role,
+      firstJoin: att.firstJoin,
+      lastLeave: att.lastLeave,
+      totalMinutes: Math.round(att.totalDuration / 60),
+      totalDurationFormatted: formatDuration(att.totalDuration),
+      joinCount: att.joinCount,
+      sessions: att.sessions.map(s => ({
+        joinTime: s.joinTime,
+        leaveTime: s.leaveTime,
+        durationMinutes: Math.round((s.duration || 0) / 60)
+      }))
+    }));
+    
+    res.json({
+      success: true,
+      roomName: room.roomName,
+      startedAt: room.startedAt,
+      endedAt: room.endedAt,
+      totalParticipants: report.length,
+      attendance: report
+    });
+  } catch (error) {
+    console.error('Get attendance error:', error);
+    res.status(500).json({ error: 'Failed to fetch attendance' });
+  }
+});
+
+// Helper function for duration formatting
+function formatDuration(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  }
+  return `${secs}s`;
+}
+
+// Get room participants (live)
+app.get('/api/jitsi/rooms/:roomId/participants', authRequired, async (req, res) => {
+  try {
+    const room = await JitsiRoom.findOne({ roomId: req.params.roomId });
+    
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Get active participants (those with open attendance sessions)
+    const activeAttendances = await JitsiAttendance.find({
+      roomId: req.params.roomId,
+      'sessions.leaveTime': null
+    }).populate('userId', 'name avatar role');
+    
+    const participants = activeAttendances.map(att => ({
+      userId: att.userId._id.toString(),
+      name: att.userId.name,
+      avatar: att.userId.avatar,
+      role: att.role,
+      joinTime: att.sessions[att.sessions.length - 1]?.joinTime
+    }));
+    
+    res.json({ success: true, participants });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch participants' });
   }
 });
 
