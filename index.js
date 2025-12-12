@@ -382,6 +382,7 @@ const SectionSchema = new Schema({
 SectionSchema.index({ teacherId: 1, name: 1 });
 
 // Group Class Schema
+// Group Class Schema - UPDATED
 const GroupClassSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true },
@@ -392,12 +393,15 @@ const GroupClassSchema = new Schema({
   sectionId: { type: Types.ObjectId, ref: 'Section' },
   studentIds: [{ type: Types.ObjectId, ref: 'User' }],
   isForAllStudents: { type: Boolean, default: false },
+  // Settings
   allowStudentVideo: { type: Boolean, default: true },
   allowStudentAudio: { type: Boolean, default: true },
   allowChat: { type: Boolean, default: true },
   allowScreenShare: { type: Boolean, default: false },
   allowWhiteboard: { type: Boolean, default: true },
+  muteOnJoin: { type: Boolean, default: false }, // NEW: Mute students when they join
   recordSession: { type: Boolean, default: false },
+  // Status
   status: { type: String, enum: ['SCHEDULED', 'LIVE', 'ENDED', 'CANCELLED'], default: 'SCHEDULED' },
   startedAt: { type: Date },
   endedAt: { type: Date },
@@ -405,11 +409,17 @@ const GroupClassSchema = new Schema({
   recordingUrl: { type: String },
   colorHex: { type: String, default: '#10B981' },
   notes: { type: String },
+  // Waiting room
+  waitingRoom: [{
+    oderId: { type: Types.ObjectId, ref: 'User' },
+    joinedAt: { type: Date, default: Date.now }
+  }],
+  // Join timing (minutes before scheduled time when join is allowed)
+  joinWindowMinutes: { type: Number, default: 10 },
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
-GroupClassSchema.index({ teacherId: 1, scheduledAt: 1 });
 
 // Group Call Participant Schema
 const GroupCallParticipantSchema = new Schema({
@@ -2125,6 +2135,44 @@ socket.on('call-user', async (data) => {
   });
 
   // ========= GROUP CALL HANDLERS =========
+
+    // ========= WAITING ROOM SOCKET EVENTS =========
+  
+  // Student joins waiting room via socket
+  socket.on('join-waiting-room', async (data) => {
+    try {
+      const { classId } = typeof data === 'string' ? JSON.parse(data) : data;
+      
+      if (!socket.userId) return;
+      
+      socket.join(`waiting-${classId}`);
+      console.log(`⏳ Socket ${socket.userId} joined waiting room for ${classId}`);
+      
+      // Notify teacher about new student in waiting room
+      const groupClass = await GroupClass.findById(classId);
+      if (groupClass) {
+        const user = await User.findById(socket.userId).select('name');
+        io.to(groupClass.teacherId.toString()).emit('student-joined-waiting', {
+          classId,
+          studentId: socket.userId,
+          studentName: user?.name,
+          waitingCount: (groupClass.waitingRoom?.length || 0) + 1
+        });
+      }
+    } catch (error) {
+      console.error('Join waiting room socket error:', error);
+    }
+  });
+
+  // Student leaves waiting room via socket
+  socket.on('leave-waiting-room', async (data) => {
+    try {
+      const { classId } = typeof data === 'string' ? JSON.parse(data) : data;
+      socket.leave(`waiting-${classId}`);
+    } catch (error) {
+      console.error('Leave waiting room socket error:', error);
+    }
+  });
   
   // Join group call
   socket.on('join-group-call', async (data) => {
@@ -6142,85 +6190,123 @@ app.delete('/api/teacher/sections/:id', authRequired, requireRole('TEACHER'), as
 // ========= GROUP CLASS ENDPOINTS =========
 
 // Get all group classes for teacher
+// Get teacher's group classes - UPDATED
 app.get('/api/teacher/group-classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const classes = await GroupClass.find({ 
       teacherId: req.userId,
-      isActive: true 
+      isActive: true
     })
     .populate('sectionId', 'name')
-    .populate('studentIds', 'name studentCode')
     .sort({ scheduledAt: -1 })
     .lean();
-    
-    const formatted = classes.map(cls => ({
-      id: cls._id.toString(),
-      title: cls.title,
-      subject: cls.subject,
-      description: cls.description,
-      scheduledAt: cls.scheduledAt,
-      duration: cls.duration,
-      sectionName: cls.sectionId?.name,
-      studentCount: cls.isForAllStudents ? 'All Students' : cls.studentIds.length,
-      status: cls.status,
-      sessionId: cls.sessionId,
-      settings: {
-        allowStudentVideo: cls.allowStudentVideo,
-        allowStudentAudio: cls.allowStudentAudio,
-        allowChat: cls.allowChat,
-        allowScreenShare: cls.allowScreenShare,
-        allowWhiteboard: cls.allowWhiteboard
-      },
-      createdAt: cls.createdAt
-    }));
-    
-    res.json({ success: true, classes: formatted });
+
+    const now = new Date();
+
+    res.json({
+      success: true,
+      classes: classes.map(c => {
+        const scheduledTime = new Date(c.scheduledAt);
+        const joinWindowMs = (c.joinWindowMinutes || 10) * 60 * 1000;
+        const canJoinAt = new Date(scheduledTime.getTime() - joinWindowMs);
+        
+        return {
+          id: c._id.toString(),
+          title: c.title,
+          subject: c.subject,
+          description: c.description,
+          scheduledAt: c.scheduledAt,
+          duration: c.duration,
+          sectionName: c.sectionId?.name,
+          studentCount: c.isForAllStudents ? 'All Students' : (c.studentIds?.length || 0),
+          status: c.status,
+          sessionId: c.sessionId,
+          settings: {
+            allowStudentVideo: c.allowStudentVideo,
+            allowStudentAudio: c.allowStudentAudio,
+            allowChat: c.allowChat,
+            allowScreenShare: c.allowScreenShare,
+            allowWhiteboard: c.allowWhiteboard,
+            muteOnJoin: c.muteOnJoin
+          },
+          colorHex: c.colorHex,
+          canJoin: now >= canJoinAt,
+          canJoinAt: canJoinAt.toISOString(),
+          waitingCount: c.waitingRoom?.length || 0,
+          createdAt: c.createdAt
+        };
+      })
+    });
   } catch (error) {
-    console.error('Get group classes error:', error);
+    console.error('Get teacher group classes error:', error);
     res.status(500).json({ error: 'Failed to fetch group classes' });
   }
 });
 
-// Get upcoming group classes for student
+// Get student's group classes - UPDATED
 app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
-    const studentId = req.userId;
-    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
-    
-    if (linkedTeacherIds.length === 0) {
-      return res.json({ success: true, classes: [] });
-    }
-    
-    const now = new Date();
+    // Get all classes where student is enrolled
+    const links = await TeacherStudentLink.find({ 
+      studentId: req.userId, 
+      isActive: true 
+    });
+    const teacherIds = links.map(l => l.teacherId);
+
     const classes = await GroupClass.find({
-      teacherId: { $in: linkedTeacherIds },
+      teacherId: { $in: teacherIds },
       isActive: true,
-      scheduledAt: { $gte: now },
       $or: [
         { isForAllStudents: true },
-        { studentIds: studentId }
-      ]
+        { studentIds: req.userId }
+      ],
+      status: { $in: ['SCHEDULED', 'LIVE'] }
     })
     .populate('teacherId', 'name avatar')
     .sort({ scheduledAt: 1 })
     .lean();
-    
-    const formatted = classes.map(cls => ({
-      id: cls._id.toString(),
-      title: cls.title,
-      subject: cls.subject,
-      description: cls.description,
-      scheduledAt: cls.scheduledAt,
-      duration: cls.duration,
-      teacherName: cls.teacherId.name,
-      teacherAvatar: cls.teacherId.avatar,
-      status: cls.status,
-      sessionId: cls.sessionId,
-      canJoin: cls.status === 'LIVE',
-      colorHex: cls.colorHex
-    }));
-    
-    res.json({ success: true, classes: formatted });
+
+    const now = new Date();
+
+    res.json({
+      success: true,
+      classes: classes.map(c => {
+        const scheduledTime = new Date(c.scheduledAt);
+        const joinWindowMs = (c.joinWindowMinutes || 10) * 60 * 1000;
+        const canJoinAt = new Date(scheduledTime.getTime() - joinWindowMs);
+        const canJoin = now >= canJoinAt;
+        
+        // Check if student is in waiting room
+        const inWaitingRoom = c.waitingRoom?.some(
+          w => w.userId?.toString() === req.userId
+        );
+
+        return {
+          id: c._id.toString(),
+          title: c.title,
+          subject: c.subject,
+          description: c.description,
+          scheduledAt: c.scheduledAt,
+          duration: c.duration,
+          teacherName: c.teacherId?.name,
+          teacherAvatar: c.teacherId?.avatar,
+          status: c.status,
+          sessionId: c.sessionId,
+          settings: {
+            allowStudentVideo: c.allowStudentVideo,
+            allowStudentAudio: c.allowStudentAudio,
+            allowChat: c.allowChat,
+            allowScreenShare: c.allowScreenShare,
+            muteOnJoin: c.muteOnJoin
+          },
+          colorHex: c.colorHex,
+          canJoin: canJoin,
+          canJoinAt: canJoinAt.toISOString(),
+          inWaitingRoom: inWaitingRoom,
+          createdAt: c.createdAt
+        };
+      })
+    });
   } catch (error) {
     console.error('Get student group classes error:', error);
     res.status(500).json({ error: 'Failed to fetch group classes' });
@@ -6228,80 +6314,85 @@ app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), asyn
 });
 
 // Create group class
+// Create Group Class - UPDATED with sessionId generation
 app.post('/api/teacher/group-classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const {
       title, subject, description, scheduledAt, duration,
       sectionId, studentIds, isForAllStudents,
       allowStudentVideo, allowStudentAudio, allowChat,
-      allowScreenShare, allowWhiteboard, recordSession,
+      allowScreenShare, allowWhiteboard, muteOnJoin,
       colorHex, notes
     } = req.body;
-    
+
     if (!title || !subject || !scheduledAt) {
       return res.status(400).json({ error: 'Title, subject, and scheduled time are required' });
     }
+
+    // Generate unique session ID for Jitsi
+    const sessionId = `tm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Determine which students to include
+    let finalStudentIds = [];
     
-    // Verify students
-    if (!isForAllStudents) {
-      const studentsToVerify = studentIds || [];
-      for (const studentId of studentsToVerify) {
-        const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-        if (!isLinked) {
-          return res.status(403).json({ error: `Not authorized for student ${studentId}` });
-        }
+    if (isForAllStudents) {
+      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
+      finalStudentIds = links.map(l => l.studentId);
+    } else if (sectionId) {
+      const section = await Section.findById(sectionId);
+      if (section) {
+        finalStudentIds = section.studentIds || [];
       }
+    } else if (studentIds && studentIds.length > 0) {
+      finalStudentIds = studentIds;
     }
-    
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
+
     const groupClass = await GroupClass.create({
       teacherId: req.userId,
       title,
       subject,
-      description: description || '',
+      description,
       scheduledAt: new Date(scheduledAt),
       duration: duration || 60,
-      sectionId: sectionId || null,
-      studentIds: isForAllStudents ? [] : (studentIds || []),
+      sectionId,
+      studentIds: finalStudentIds,
       isForAllStudents: isForAllStudents || false,
       allowStudentVideo: allowStudentVideo !== false,
       allowStudentAudio: allowStudentAudio !== false,
       allowChat: allowChat !== false,
       allowScreenShare: allowScreenShare || false,
       allowWhiteboard: allowWhiteboard !== false,
-      recordSession: recordSession || false,
-      sessionId,
+      muteOnJoin: muteOnJoin || false,
       colorHex: colorHex || '#10B981',
-      notes: notes || ''
+      notes,
+      sessionId,
+      joinWindowMinutes: 10 // Students can join 10 minutes before
     });
-    
-    // Notify students
-    let studentsToNotify = [];
-    if (isForAllStudents) {
-      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
-      studentsToNotify = links.map(l => l.studentId);
-    } else if (sectionId) {
-      const section = await Section.findById(sectionId);
-      if (section) studentsToNotify = section.studentIds;
-    } else {
-      studentsToNotify = studentIds || [];
-    }
-    
-    for (const studentId of studentsToNotify) {
+
+    // Notify enrolled students about the scheduled class
+    for (const studentId of finalStudentIds) {
       await createNotification(
         studentId,
         'CLASS',
-        'New Online Class Scheduled',
-        `${title} scheduled for ${new Date(scheduledAt).toLocaleString()}`,
-        { groupClassId: groupClass._id, sessionId }
+        'New Group Class Scheduled',
+        `${title} is scheduled for ${new Date(scheduledAt).toLocaleString()}`,
+        { classId: groupClass._id.toString(), type: 'group_class_scheduled' }
       );
+      
+      io.to(studentId.toString()).emit('group-class-scheduled', {
+        classId: groupClass._id.toString(),
+        title,
+        scheduledAt,
+        teacherId: req.userId
+      });
     }
-    
-    res.status(201).json({ 
-      success: true, 
+
+    console.log(`📚 Group class created: ${title} with sessionId: ${sessionId}`);
+
+    res.status(201).json({
+      success: true,
       classId: groupClass._id.toString(),
-      sessionId 
+      sessionId: groupClass.sessionId
     });
   } catch (error) {
     console.error('Create group class error:', error);
@@ -6346,71 +6437,86 @@ app.put('/api/teacher/group-classes/:id', authRequired, requireRole('TEACHER'), 
 
 // Start group class (teacher)
 // Start group class (teacher) - FIXED VERSION
+// Teacher starts group class - UPDATED with waiting room notification
 app.post('/api/teacher/group-classes/:id/start', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
-    const groupClass = await GroupClass.findOne({ _id: req.params.id, teacherId: req.userId });
-    if (!groupClass) {
-      return res.status(404).json({ error: 'Group class not found' });
-    }
+    const groupClass = await GroupClass.findOne({ 
+      _id: req.params.id, 
+      teacherId: req.userId 
+    });
     
-    // Update class status
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    if (groupClass.status === 'LIVE') {
+      return res.json({ 
+        success: true, 
+        sessionId: groupClass.sessionId,
+        message: 'Class is already live'
+      });
+    }
+
+    if (groupClass.status === 'ENDED') {
+      return res.status(400).json({ error: 'Class has already ended' });
+    }
+
+    // Generate sessionId if not exists
+    if (!groupClass.sessionId) {
+      groupClass.sessionId = `tm_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
     groupClass.status = 'LIVE';
     groupClass.startedAt = new Date();
     await groupClass.save();
-    
-    // ✅ FIX: Use findOneAndUpdate with upsert to handle rejoining
-    await GroupCallParticipant.findOneAndUpdate(
-      { 
-        sessionId: groupClass.sessionId, 
-        userId: req.userId 
-      },
-      {
-        role: 'HOST',
-        socketId: connectedUsers.get(req.userId),
-        connectionState: 'CONNECTED',
-        isVideoEnabled: true,
-        isAudioEnabled: true,
-        joinedAt: new Date(),
-        leftAt: null  // Clear leftAt in case of rejoin
-      },
-      { 
-        upsert: true,  // Create if doesn't exist, update if it does
-        new: true 
-      }
-    );
-    
-    // Notify all students
-    let studentIds = [];
+
+    // Get all enrolled students
+    let studentIds = groupClass.studentIds || [];
     if (groupClass.isForAllStudents) {
       const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
-      studentIds = links.map(l => l.studentId.toString());
-    } else {
-      studentIds = groupClass.studentIds.map(id => id.toString());
+      studentIds = links.map(l => l.studentId);
     }
-    
+
+    // Notify ALL enrolled students that class has started
     for (const studentId of studentIds) {
-      io.to(studentId).emit('class_started', {
+      io.to(studentId.toString()).emit('group-class-started', {
         classId: groupClass._id.toString(),
         sessionId: groupClass.sessionId,
         title: groupClass.title,
-        teacherId: req.userId
+        settings: {
+          allowStudentVideo: groupClass.allowStudentVideo,
+          allowStudentAudio: groupClass.allowStudentAudio,
+          allowChat: groupClass.allowChat,
+          allowScreenShare: groupClass.allowScreenShare,
+          muteOnJoin: groupClass.muteOnJoin
+        }
       });
-      
-      await createNotification(
-        studentId,
-        'CLASS',
-        'Class Started',
-        `${groupClass.title} is now live!`,
-        { groupClassId: groupClass._id, sessionId: groupClass.sessionId }
-      );
     }
-    
-    console.log(`✅ Class ${groupClass._id} started by teacher ${req.userId}`);
-    
-    res.json({ 
-      success: true, 
+
+    // Notify students in waiting room specifically (they should auto-redirect)
+    io.to(`waiting-${groupClass._id.toString()}`).emit('class-started-join-now', {
+      classId: groupClass._id.toString(),
       sessionId: groupClass.sessionId,
-      message: 'Class started successfully' 
+      title: groupClass.title,
+      settings: {
+        allowStudentVideo: groupClass.allowStudentVideo,
+        allowStudentAudio: groupClass.allowStudentAudio,
+        allowChat: groupClass.allowChat,
+        allowScreenShare: groupClass.allowScreenShare,
+        muteOnJoin: groupClass.muteOnJoin
+      }
+    });
+
+    // Clear waiting room
+    groupClass.waitingRoom = [];
+    await groupClass.save();
+
+    console.log(`🎥 Group class started: ${groupClass.title} (${groupClass.sessionId})`);
+
+    res.json({
+      success: true,
+      sessionId: groupClass.sessionId,
+      message: 'Class started'
     });
   } catch (error) {
     console.error('Start group class error:', error);
@@ -6515,6 +6621,154 @@ app.post('/api/student/group-classes/:id/join', authRequired, requireRole('STUDE
   } catch (error) {
     console.error('Join group class error:', error);
     res.status(500).json({ error: 'Failed to join class' });
+  }
+});
+
+// Student joins waiting room (before teacher starts)
+app.post('/api/student/group-classes/:id/join-waiting', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findById(req.params.id);
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    // Check if student is enrolled
+    const isEnrolled = groupClass.isForAllStudents || 
+      groupClass.studentIds.some(id => id.toString() === req.userId);
+    
+    if (!isEnrolled) {
+      return res.status(403).json({ error: 'You are not enrolled in this class' });
+    }
+
+    // Check if within join window
+    const now = new Date();
+    const scheduledTime = new Date(groupClass.scheduledAt);
+    const joinWindowMs = (groupClass.joinWindowMinutes || 10) * 60 * 1000;
+    const canJoinAt = new Date(scheduledTime.getTime() - joinWindowMs);
+    
+    if (now < canJoinAt) {
+      const minutesUntilJoin = Math.ceil((canJoinAt - now) / 60000);
+      return res.status(400).json({ 
+        error: 'Too early to join',
+        canJoinAt: canJoinAt.toISOString(),
+        minutesUntilJoin
+      });
+    }
+
+    // If class is already LIVE, redirect to join directly
+    if (groupClass.status === 'LIVE') {
+      return res.json({
+        success: true,
+        status: 'LIVE',
+        sessionId: groupClass.sessionId,
+        message: 'Class is live, join now'
+      });
+    }
+
+    // If class has ended
+    if (groupClass.status === 'ENDED' || groupClass.status === 'CANCELLED') {
+      return res.status(400).json({ error: 'Class has ended or was cancelled' });
+    }
+
+    // Add to waiting room if not already there
+    const alreadyInWaiting = groupClass.waitingRoom?.some(
+      w => w.userId?.toString() === req.userId
+    );
+    
+    if (!alreadyInWaiting) {
+      if (!groupClass.waitingRoom) {
+        groupClass.waitingRoom = [];
+      }
+      groupClass.waitingRoom.push({
+        userId: req.userId,
+        joinedAt: new Date()
+      });
+      await groupClass.save();
+    }
+
+    // Join socket room for waiting room updates
+    const socketId = connectedUsers.get(req.userId);
+    if (socketId) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.join(`waiting-${groupClass._id.toString()}`);
+      }
+    }
+
+    console.log(`⏳ Student ${req.userId} joined waiting room for class ${groupClass._id}`);
+
+    res.json({
+      success: true,
+      status: 'WAITING',
+      message: 'You are in the waiting room. You will be notified when the teacher starts the class.',
+      classTitle: groupClass.title,
+      scheduledAt: groupClass.scheduledAt,
+      teacherId: groupClass.teacherId
+    });
+  } catch (error) {
+    console.error('Join waiting room error:', error);
+    res.status(500).json({ error: 'Failed to join waiting room' });
+  }
+});
+
+// Student leaves waiting room
+app.post('/api/student/group-classes/:id/leave-waiting', authRequired, async (req, res) => {
+  try {
+    await GroupClass.findByIdAndUpdate(req.params.id, {
+      $pull: { waitingRoom: { userId: req.userId } }
+    });
+
+    // Leave socket room
+    const socketId = connectedUsers.get(req.userId);
+    if (socketId) {
+      const socket = io.sockets.sockets.get(socketId);
+      if (socket) {
+        socket.leave(`waiting-${req.params.id}`);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to leave waiting room' });
+  }
+});
+
+// Check class status (for polling or on resume)
+app.get('/api/group-classes/:id/status', authRequired, async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findById(req.params.id)
+      .select('status sessionId scheduledAt title teacherId settings')
+      .lean();
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+
+    // Calculate if join is allowed
+    const now = new Date();
+    const scheduledTime = new Date(groupClass.scheduledAt);
+    const joinWindowMs = 10 * 60 * 1000; // 10 minutes
+    const canJoinAt = new Date(scheduledTime.getTime() - joinWindowMs);
+    const canJoin = now >= canJoinAt;
+
+    res.json({
+      success: true,
+      status: groupClass.status,
+      sessionId: groupClass.sessionId,
+      canJoin,
+      canJoinAt: canJoinAt.toISOString(),
+      scheduledAt: groupClass.scheduledAt,
+      settings: {
+        allowStudentVideo: groupClass.allowStudentVideo,
+        allowStudentAudio: groupClass.allowStudentAudio,
+        allowChat: groupClass.allowChat,
+        allowScreenShare: groupClass.allowScreenShare,
+        muteOnJoin: groupClass.muteOnJoin
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get class status' });
   }
 });
 
