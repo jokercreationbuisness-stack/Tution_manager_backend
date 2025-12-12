@@ -399,6 +399,8 @@ const GroupClassSchema = new Schema({
   sectionId: { type: Types.ObjectId, ref: 'Section' },
   studentIds: [{ type: Types.ObjectId, ref: 'User' }],
   isForAllStudents: { type: Boolean, default: false },
+  teacherInClass: { type: Boolean, default: false },
+  teacherJoinedAt: { type: Date },
   // Settings
   allowStudentVideo: { type: Boolean, default: true },
   allowStudentAudio: { type: Boolean, default: true },
@@ -10389,6 +10391,132 @@ app.post('/api/jitsi/rooms/:roomId/start', authRequired, requireRole('TEACHER'),
   } catch (error) {
     console.error('Start class error:', error);
     res.status(500).json({ error: 'Failed to start class' });
+  }
+});
+
+// Teacher joins the class - enables students to join
+app.post('/api/group-classes/:id/teacher-joined', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ 
+      _id: req.params.id, 
+      teacherId: req.userId 
+    });
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    if (groupClass.status !== 'LIVE') {
+      return res.status(400).json({ error: 'Class is not live' });
+    }
+    
+    // Mark teacher as in class
+    groupClass.teacherInClass = true;
+    groupClass.teacherJoinedAt = new Date();
+    await groupClass.save();
+    
+    // Notify all enrolled students that they can now join
+    const studentIds = groupClass.isForAllStudents 
+      ? (await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })).map(l => l.studentId)
+      : groupClass.studentIds;
+    
+    studentIds.forEach(studentId => {
+      io.to(studentId.toString()).emit('class-ready-to-join', {
+        classId: groupClass._id.toString(),
+        sessionId: groupClass.sessionId,
+        title: groupClass.title,
+        teacherName: req.userName || 'Teacher'
+      });
+    });
+    
+    console.log(`👨‍🏫 Teacher joined class: ${groupClass.title}`);
+    
+    res.json({ 
+      success: true, 
+      message: 'Teacher joined, students can now join',
+      teacherJoinedAt: groupClass.teacherJoinedAt
+    });
+  } catch (error) {
+    console.error('Teacher joined error:', error);
+    res.status(500).json({ error: 'Failed to update class status' });
+  }
+});
+
+// Teacher leaves the class - ends class for everyone
+app.post('/api/group-classes/:id/teacher-left', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findOne({ 
+      _id: req.params.id, 
+      teacherId: req.userId 
+    });
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    // End the class
+    groupClass.teacherInClass = false;
+    groupClass.status = 'ENDED';
+    groupClass.endedAt = new Date();
+    await groupClass.save();
+    
+    // Notify all participants that class has ended
+    io.emit('class-ended', {
+      classId: groupClass._id.toString(),
+      sessionId: groupClass.sessionId,
+      reason: 'Teacher ended the class'
+    });
+    
+    console.log(`🏁 Teacher ended class: ${groupClass.title}`);
+    
+    res.json({ success: true, message: 'Class ended' });
+  } catch (error) {
+    console.error('Teacher left error:', error);
+    res.status(500).json({ error: 'Failed to end class' });
+  }
+});
+
+// Check if student can join (teacher must be in class)
+app.get('/api/group-classes/:id/can-join', authRequired, async (req, res) => {
+  try {
+    const groupClass = await GroupClass.findById(req.params.id)
+      .populate('teacherId', 'name avatar');
+    
+    if (!groupClass) {
+      return res.status(404).json({ error: 'Class not found' });
+    }
+    
+    const isTeacher = groupClass.teacherId._id.toString() === req.userId;
+    
+    // Teachers can always join
+    if (isTeacher) {
+      return res.json({ 
+        success: true, 
+        canJoin: true,
+        isTeacher: true,
+        status: groupClass.status
+      });
+    }
+    
+    // Students can only join if class is LIVE AND teacher is in class
+    const canJoin = groupClass.status === 'LIVE' && groupClass.teacherInClass === true;
+    
+    res.json({
+      success: true,
+      canJoin,
+      isTeacher: false,
+      status: groupClass.status,
+      teacherInClass: groupClass.teacherInClass,
+      teacherName: groupClass.teacherId.name,
+      message: !canJoin 
+        ? (groupClass.status !== 'LIVE' 
+            ? 'Class has not started yet' 
+            : 'Waiting for teacher to join...')
+        : 'You can join now'
+    });
+  } catch (error) {
+    console.error('Can join check error:', error);
+    res.status(500).json({ error: 'Failed to check join status' });
   }
 });
 
