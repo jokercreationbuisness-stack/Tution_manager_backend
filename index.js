@@ -10506,7 +10506,7 @@ app.post('/api/group-classes/:id/teacher-joined', authRequired, requireRole('TEA
 });
 
 // Teacher leaves the class - ends class for everyone
-// Teacher leaves the class - ends class for everyone
+// Teacher leaves the class - DELETES class for everyone
 app.post('/api/group-classes/:id/teacher-left', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const groupClass = await GroupClass.findOne({ 
@@ -10518,37 +10518,39 @@ app.post('/api/group-classes/:id/teacher-left', authRequired, requireRole('TEACH
       return res.status(404).json({ error: 'Class not found' });
     }
     
-    // End the class
-    groupClass.teacherInClass = false;
-    groupClass.status = 'ENDED';
-    groupClass.endedAt = new Date();
-    groupClass.isActive = false; // Mark as inactive so it doesn't show in dashboard
-    await groupClass.save();
+    const classId = groupClass._id.toString();
+    const sessionId = groupClass.sessionId;
+    const classTitle = groupClass.title;
     
-    // Get all enrolled students to notify them
+    // Get all enrolled students to notify them BEFORE deleting
     const studentIds = groupClass.isForAllStudents 
       ? (await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })).map(l => l.studentId.toString())
       : groupClass.studentIds.map(id => id.toString());
     
-    // Notify all participants that class has ended via their user rooms
+    // DELETE the class completely
+    await GroupClass.findByIdAndDelete(req.params.id);
+    
+    // Notify all participants that class has ended and is deleted
     studentIds.forEach(studentId => {
       io.to(studentId).emit('class-ended', {
-        classId: groupClass._id.toString(),
-        sessionId: groupClass.sessionId,
-        reason: 'Teacher ended the class'
+        classId: classId,
+        sessionId: sessionId,
+        reason: 'Teacher ended the class',
+        deleted: true
       });
     });
     
-    // Also broadcast globally for any connected clients
+    // Also broadcast globally
     io.emit('class-ended', {
-      classId: groupClass._id.toString(),
-      sessionId: groupClass.sessionId,
-      reason: 'Teacher ended the class'
+      classId: classId,
+      sessionId: sessionId,
+      reason: 'Teacher ended the class',
+      deleted: true
     });
     
-    console.log(`🏁 Teacher ended class: ${groupClass.title} - notified ${studentIds.length} students`);
+    console.log(`🗑️ Teacher DELETED class: ${classTitle}`);
     
-    res.json({ success: true, message: 'Class ended' });
+    res.json({ success: true, message: 'Class ended and deleted' });
   } catch (error) {
     console.error('Teacher left error:', error);
     res.status(500).json({ error: 'Failed to end class' });
