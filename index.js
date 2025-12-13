@@ -3500,13 +3500,28 @@ app.post('/api/student/teachers/:teacherId/unblock', authRequired, requireRole('
   }
 });
 
+// ========= STUDENT CLASSES ENDPOINT - COMPLETE MERGED VERSION =========
+// Get all classes for student (both regular and group classes)
+// DELETE BOTH OLD ENDPOINTS AND USE ONLY THIS ONE
 app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
-    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    
+    // 1. Get all linked teachers for this student
+    const links = await TeacherStudentLink.find({ 
+      studentId: studentId, 
+      isActive: true,
+      isBlocked: { $ne: true }
+    }).select('teacherId');
+    
+    const linkedTeacherIds = links.map(link => link.teacherId);
     
     if (linkedTeacherIds.length === 0) {
-      return res.json({ success: true, classes: [] });
+      return res.json({ 
+        success: true, 
+        classes: [],
+        message: 'No linked teachers found'
+      });
     }
     
     // ========= FETCH REGULAR CLASSES =========
@@ -3518,7 +3533,7 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
         { scope: 'INDIVIDUAL', studentId: studentId }
       ]
     })
-    .populate('teacherId', 'name')
+    .populate('teacherId', 'name avatar')
     .sort({ dayOfWeek: 1, startTime: 1 })
     .lean();
     
@@ -3536,14 +3551,14 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
     const groupClasses = await GroupClass.find({
       teacherId: { $in: linkedTeacherIds },
       isActive: true,
-      status: { $in: ['SCHEDULED', 'LIVE'] }, // Only show upcoming/active classes
+      status: { $in: ['SCHEDULED', 'LIVE'] },
       $or: [
-        { isForAllStudents: true }, // Classes for all students
-        { studentIds: studentId }, // Directly assigned to student
-        { sectionId: { $in: sectionIds } } // Student's section is assigned
+        { isForAllStudents: true },
+        { studentIds: studentId },
+        { sectionId: { $in: sectionIds } }
       ]
     })
-    .populate('teacherId', 'name')
+    .populate('teacherId', 'name avatar')
     .populate('sectionId', 'name')
     .sort({ scheduledAt: 1 })
     .lean();
@@ -3551,40 +3566,46 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
     // ========= FORMAT REGULAR CLASSES =========
     const formattedRegularClasses = regularClasses.map(c => ({
       id: c._id.toString(),
-      type: 'REGULAR', // ✅ Add type field
+      type: 'REGULAR',
       subject: c.subject || c.title,
-      title: c.title,
-      dayOfWeek: c.dayOfWeek,
+      title: c.title || c.subject,
+      dayOfWeek: c.dayOfWeek,           // ✅ CRITICAL: 1=Monday to 7=Sunday
       startTime: c.startTime,
       endTime: c.endTime,
-      colorHex: c.colorHex,
+      colorHex: c.colorHex || '#3B82F6',
       notes: c.notes,
       location: c.location,
-      teacherName: c.teacherId?.name,
-      scope: c.scope
+      teacherName: c.teacherId?.name || 'Unknown Teacher',
+      teacherAvatar: c.teacherId?.avatar,
+      scope: c.scope,
+      createdAt: c.createdAt
     }));
     
     // ========= FORMAT GROUP CLASSES =========
     const formattedGroupClasses = groupClasses.map(c => ({
       id: c._id.toString(),
-      type: 'GROUP', // ✅ Add type field
+      type: 'GROUP',
       subject: c.subject,
       title: c.title,
       description: c.description,
-      scheduledAt: c.scheduledAt.toISOString(),
-      duration: c.duration,
+      scheduledAt: c.scheduledAt?.toISOString(),
+      duration: c.duration || 60,
       colorHex: c.colorHex || '#10B981',
       notes: c.notes,
-      teacherName: c.teacherId?.name,
+      teacherName: c.teacherId?.name || 'Unknown Teacher',
+      teacherAvatar: c.teacherId?.avatar,
       sectionName: c.sectionId?.name,
       status: c.status,
       sessionId: c.sessionId,
+      teacherInClass: c.teacherInClass || false,  // ✅ CRITICAL for Join button
       // Settings
-      allowStudentVideo: c.allowStudentVideo,
-      allowStudentAudio: c.allowStudentAudio,
-      allowChat: c.allowChat,
-      allowScreenShare: c.allowScreenShare,
-      allowWhiteboard: c.allowWhiteboard,
+      settings: {
+        allowStudentVideo: c.allowStudentVideo !== false,
+        allowStudentAudio: c.allowStudentAudio !== false,
+        allowChat: c.allowChat !== false,
+        allowScreenShare: c.allowScreenShare || false,
+        allowWhiteboard: c.allowWhiteboard !== false
+      },
       // Times
       startedAt: c.startedAt?.toISOString(),
       endedAt: c.endedAt?.toISOString()
@@ -3596,80 +3617,15 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
       ...formattedGroupClasses
     ];
     
-    res.json({ 
-      success: true, 
-      classes: allClasses,
-      summary: {
-        regularClasses: formattedRegularClasses.length,
-        groupClasses: formattedGroupClasses.length,
-        total: allClasses.length
-      }
-    });
-    
-  } catch (error) {
-    console.error('Student classes error:', error);
-    res.status(500).json({ error: 'Failed to fetch classes' });
-  }
-});
-
-// ========= STUDENT CLASSES ENDPOINT - FIXED =========
-// Get all classes for student (both regular and group classes organized by day)
-app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
-  try {
-    // 1. Get all linked teachers for this student
-    const links = await TeacherStudentLink.find({ 
-      studentId: req.userId, 
-      isActive: true,
-      isBlocked: false 
-    }).select('teacherId');
-    
-    const teacherIds = links.map(link => link.teacherId);
-    
-    if (teacherIds.length === 0) {
-      return res.json({ 
-        success: true, 
-        classes: [],
-        message: 'No linked teachers found'
-      });
+    // Debug logging
+    console.log(`📚 Student ${studentId}: ${formattedRegularClasses.length} regular, ${formattedGroupClasses.length} group classes`);
+    if (formattedRegularClasses.length > 0) {
+      console.log(`📚 Sample regular: "${formattedRegularClasses[0].subject}" dayOfWeek=${formattedRegularClasses[0].dayOfWeek}`);
     }
     
-    // 2. Get regular classes from linked teachers
-    // - Classes with scope 'ALL' from linked teachers
-    // - Classes with scope 'INDIVIDUAL' specifically for this student
-    const regularClasses = await ClassModel.find({
-      teacherId: { $in: teacherIds },
-      isActive: true,
-      $or: [
-        { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: req.userId }
-      ]
-    })
-    .populate('teacherId', 'name avatar')
-    .lean();
-    
-    // 3. Format regular classes with type and day info
-    const formattedClasses = regularClasses.map(cls => ({
-      id: cls._id.toString(),
-      type: 'REGULAR',
-      subject: cls.subject,
-      title: cls.title || cls.subject,
-      dayOfWeek: cls.dayOfWeek, // 1=Monday, 7=Sunday
-      startTime: cls.startTime,
-      endTime: cls.endTime,
-      colorHex: cls.colorHex || '#3B82F6',
-      notes: cls.notes,
-      location: cls.location,
-      teacherName: cls.teacherId?.name || 'Unknown Teacher',
-      teacherAvatar: cls.teacherId?.avatar,
-      scope: cls.scope,
-      createdAt: cls.createdAt
-    }));
-    
-    console.log(`📚 Student ${req.userId} fetched ${formattedClasses.length} regular classes from ${teacherIds.length} teachers`);
-    
-    res.json({
-      success: true,
-      classes: formattedClasses
+    res.json({ 
+      success: true, 
+      classes: allClasses
     });
     
   } catch (error) {
@@ -4168,96 +4124,102 @@ app.get('/api/teacher/analytics/:studentId', authRequired, requireRole('TEACHER'
 });
 
 // ========= CLASS MANAGEMENT =========
+// ========= POST /api/teacher/classes - Create new class =========
 app.post('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
-
-    if (!subject || !title || !dayOfWeek || !startTime) {
-      return res.status(400).json({ error: 'Required fields: subject, title, dayOfWeek, startTime' });
+    
+    // Validate required fields
+    if (!subject || !title || !dayOfWeek || !startTime || !endTime) {
+      return res.status(400).json({ error: 'Subject, title, dayOfWeek, startTime, and endTime are required' });
     }
-
-    if (scope === 'INDIVIDUAL' && studentId) {
-      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not authorized to create class for this student' });
-      }
+    
+    // ✅ CRITICAL: Ensure dayOfWeek is a number between 1-7
+    const day = parseInt(dayOfWeek, 10);
+    if (isNaN(day) || day < 1 || day > 7) {
+      return res.status(400).json({ error: 'dayOfWeek must be a number between 1 (Monday) and 7 (Sunday)' });
     }
-
-    const classData = {
+    
+    const newClass = await ClassModel.create({
       teacherId: req.userId,
       subject,
       title,
-      dayOfWeek,
+      dayOfWeek: day,  // ✅ Ensure it's saved as integer
       startTime,
-      endTime: endTime || startTime,
+      endTime,
       colorHex: colorHex || '#3B82F6',
-      notes: notes || '',
-      location: location || '',
+      notes,
+      location,
       scope: scope || 'ALL',
-      studentId: scope === 'INDIVIDUAL' ? studentId : null,
-      isActive: true
-    };
-
-    const newClass = await ClassModel.create(classData);
-
-    if (scope === 'ALL') {
-      const links = await TeacherStudentLink.find({ 
-        teacherId: req.userId, 
-        isActive: true 
-      });
-      
-      for (const link of links) {
-        await createNotification(
-          link.studentId,
-          'CLASS',
-          'New Class Added',
-          `Your teacher added a new class: ${subject}`,
-          { classId: newClass._id }
-        );
+      studentId: scope === 'INDIVIDUAL' ? studentId : undefined
+    });
+    
+    console.log(`📚 Created class: ${subject} on day ${day} by teacher ${req.userId}`);
+    
+    res.status(201).json({
+      success: true,
+      class: {
+        id: newClass._id.toString(),
+        subject: newClass.subject,
+        title: newClass.title,
+        dayOfWeek: newClass.dayOfWeek,
+        startTime: newClass.startTime,
+        endTime: newClass.endTime,
+        colorHex: newClass.colorHex
       }
-    } else if (scope === 'INDIVIDUAL' && studentId) {
-      await createNotification(
-        studentId,
-        'CLASS',
-        'New Class Added',
-        `Your teacher added a new class: ${subject}`,
-        { classId: newClass._id }
-      );
-    }
-
-    res.status(201).json({ success: true, classId: newClass._id });
+    });
   } catch (error) {
     console.error('Create class error:', error);
     res.status(500).json({ error: 'Failed to create class' });
   }
 });
 
+// ========= PUT /api/teacher/classes/:id - Update class =========
 app.put('/api/teacher/classes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
-    const classId = req.params.id;
     const { subject, title, dayOfWeek, startTime, endTime, colorHex, notes, location, scope, studentId } = req.body;
-
-    const existingClass = await ClassModel.findOne({ _id: classId, teacherId: req.userId });
+    
+    const existingClass = await ClassModel.findOne({ _id: req.params.id, teacherId: req.userId });
     if (!existingClass) {
       return res.status(404).json({ error: 'Class not found' });
     }
-
-    const updateData = {
-      subject: subject || existingClass.subject,
-      title: title || existingClass.title,
-      dayOfWeek: dayOfWeek || existingClass.dayOfWeek,
-      startTime: startTime || existingClass.startTime,
-      endTime: endTime || existingClass.endTime,
-      colorHex: colorHex || existingClass.colorHex,
-      notes: notes !== undefined ? notes : existingClass.notes,
-      location: location !== undefined ? location : existingClass.location,
-      scope: scope || existingClass.scope,
-      studentId: scope === 'INDIVIDUAL' ? studentId : null
-    };
-
-    await ClassModel.findByIdAndUpdate(classId, updateData);
-    res.status(204).send();
+    
+    // ✅ CRITICAL: Update dayOfWeek if provided
+    if (dayOfWeek !== undefined) {
+      const day = parseInt(dayOfWeek, 10);
+      if (isNaN(day) || day < 1 || day > 7) {
+        return res.status(400).json({ error: 'dayOfWeek must be between 1 and 7' });
+      }
+      existingClass.dayOfWeek = day;
+    }
+    
+    if (subject) existingClass.subject = subject;
+    if (title) existingClass.title = title;
+    if (startTime) existingClass.startTime = startTime;
+    if (endTime) existingClass.endTime = endTime;
+    if (colorHex) existingClass.colorHex = colorHex;
+    if (notes !== undefined) existingClass.notes = notes;
+    if (location !== undefined) existingClass.location = location;
+    if (scope) existingClass.scope = scope;
+    if (scope === 'INDIVIDUAL' && studentId) existingClass.studentId = studentId;
+    
+    await existingClass.save();
+    
+    console.log(`📚 Updated class ${req.params.id}: dayOfWeek=${existingClass.dayOfWeek}`);
+    
+    res.json({
+      success: true,
+      class: {
+        id: existingClass._id.toString(),
+        subject: existingClass.subject,
+        title: existingClass.title,
+        dayOfWeek: existingClass.dayOfWeek,
+        startTime: existingClass.startTime,
+        endTime: existingClass.endTime
+      }
+    });
   } catch (error) {
+    console.error('Update class error:', error);
     res.status(500).json({ error: 'Failed to update class' });
   }
 });
