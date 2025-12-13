@@ -6272,53 +6272,51 @@ app.delete('/api/teacher/sections/:id', authRequired, requireRole('TEACHER'), as
 // ========= GROUP CLASS ENDPOINTS =========
 
 // Get all group classes for teacher
-// Get teacher's group classes - UPDATED
+// Get teacher group classes - optionally filter out old ENDED classes
 app.get('/api/teacher/group-classes', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
-    const classes = await GroupClass.find({ 
-      teacherId: req.userId,
-      isActive: true
-    })
-    .populate('sectionId', 'name')
-    .sort({ scheduledAt: -1 })
-    .lean();
-
-    const now = new Date();
-
-    res.json({
-      success: true,
-      classes: classes.map(c => {
-        const scheduledTime = new Date(c.scheduledAt);
-        const joinWindowMs = (c.joinWindowMinutes || 10) * 60 * 1000;
-        const canJoinAt = new Date(scheduledTime.getTime() - joinWindowMs);
-        
-        return {
-          id: c._id.toString(),
-          title: c.title,
-          subject: c.subject,
-          description: c.description,
-          scheduledAt: c.scheduledAt,
-          duration: c.duration,
-          sectionName: c.sectionId?.name,
-          studentCount: c.isForAllStudents ? 'All Students' : (c.studentIds?.length || 0),
-          status: c.status,
-          sessionId: c.sessionId,
-          settings: {
-            allowStudentVideo: c.allowStudentVideo,
-            allowStudentAudio: c.allowStudentAudio,
-            allowChat: c.allowChat,
-            allowScreenShare: c.allowScreenShare,
-            allowWhiteboard: c.allowWhiteboard,
-            muteOnJoin: c.muteOnJoin
-          },
-          colorHex: c.colorHex,
-          canJoin: now >= canJoinAt,
-          canJoinAt: canJoinAt.toISOString(),
-          waitingCount: c.waitingRoom?.length || 0,
-          createdAt: c.createdAt
-        };
-      })
-    });
+    const { includeEnded } = req.query;
+    
+    const query = { teacherId: req.userId };
+    
+    // By default, hide classes that ended more than 1 hour ago
+    if (!includeEnded) {
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+      query.$or = [
+        { status: { $ne: 'ENDED' } },
+        { status: 'ENDED', endedAt: { $gte: oneHourAgo } }
+      ];
+    }
+    
+    const groupClasses = await GroupClass.find(query)
+      .populate('sectionId', 'name')
+      .sort({ scheduledAt: -1 })
+      .lean();
+    
+    const formatted = groupClasses.map(gc => ({
+      id: gc._id.toString(),
+      title: gc.title,
+      subject: gc.subject,
+      description: gc.description,
+      scheduledAt: gc.scheduledAt,
+      duration: gc.duration,
+      status: gc.status,
+      sessionId: gc.sessionId,
+      sectionName: gc.sectionId?.name,
+      studentCount: gc.isForAllStudents ? 'All Students' : (gc.studentIds?.length || 0),
+      teacherInClass: gc.teacherInClass || false,
+      settings: {
+        allowStudentVideo: gc.allowStudentVideo,
+        allowStudentAudio: gc.allowStudentAudio,
+        allowChat: gc.allowChat,
+        allowScreenShare: gc.allowScreenShare,
+        muteOnJoin: gc.muteOnJoin
+      },
+      colorHex: gc.colorHex,
+      createdAt: gc.createdAt
+    }));
+    
+    res.json({ success: true, classes: formatted });
   } catch (error) {
     console.error('Get teacher group classes error:', error);
     res.status(500).json({ error: 'Failed to fetch group classes' });
@@ -6364,29 +6362,30 @@ app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), asyn
         );
 
         return {
-          id: c._id.toString(),
-          title: c.title,
-          subject: c.subject,
-          description: c.description,
-          scheduledAt: c.scheduledAt,
-          duration: c.duration,
-          teacherName: c.teacherId?.name,
-          teacherAvatar: c.teacherId?.avatar,
-          status: c.status,
-          sessionId: c.sessionId,
-          settings: {
-            allowStudentVideo: c.allowStudentVideo,
-            allowStudentAudio: c.allowStudentAudio,
-            allowChat: c.allowChat,
-            allowScreenShare: c.allowScreenShare,
-            muteOnJoin: c.muteOnJoin
-          },
-          colorHex: c.colorHex,
-          canJoin: canJoin,
-          canJoinAt: canJoinAt.toISOString(),
-          inWaitingRoom: inWaitingRoom,
-          createdAt: c.createdAt
-        };
+  id: c._id.toString(),
+  title: c.title,
+  subject: c.subject,
+  description: c.description,
+  scheduledAt: c.scheduledAt,
+  duration: c.duration,
+  teacherName: c.teacherId?.name,
+  teacherAvatar: c.teacherId?.avatar,
+  status: c.status,
+  sessionId: c.sessionId,
+  teacherInClass: c.teacherInClass || false,  // ADD THIS LINE
+  settings: {
+    allowStudentVideo: c.allowStudentVideo,
+    allowStudentAudio: c.allowStudentAudio,
+    allowChat: c.allowChat,
+    allowScreenShare: c.allowScreenShare,
+    muteOnJoin: c.muteOnJoin
+  },
+  colorHex: c.colorHex,
+  canJoin: c.status === 'LIVE' && c.teacherInClass === true,  // UPDATE THIS LINE
+  canJoinAt: canJoinAt.toISOString(),
+  inWaitingRoom: inWaitingRoom,
+  createdAt: c.createdAt
+};
       })
     });
   } catch (error) {
@@ -6851,6 +6850,65 @@ app.get('/api/group-classes/:id/status', authRequired, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get class status' });
+  }
+});
+
+// Get student group classes - filter out ENDED classes
+app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    // Get all teachers linked to this student
+    const links = await TeacherStudentLink.find({ 
+      studentId: req.userId, 
+      isActive: true 
+    }).select('teacherId');
+    
+    const teacherIds = links.map(l => l.teacherId);
+    
+    // Find group classes from linked teachers that are NOT ENDED
+    const groupClasses = await GroupClass.find({
+      teacherId: { $in: teacherIds },
+      status: { $ne: 'ENDED' }, // Exclude ended classes
+      isActive: true,
+      $or: [
+        { isForAllStudents: true },
+        { studentIds: req.userId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .populate('sectionId', 'name')
+    .sort({ scheduledAt: 1 })
+    .lean();
+    
+    const formatted = groupClasses.map(gc => ({
+      id: gc._id.toString(),
+      title: gc.title,
+      subject: gc.subject,
+      description: gc.description,
+      scheduledAt: gc.scheduledAt,
+      duration: gc.duration,
+      status: gc.status,
+      sessionId: gc.sessionId,
+      teacherName: gc.teacherId?.name,
+      teacherAvatar: gc.teacherId?.avatar,
+      sectionName: gc.sectionId?.name,
+      studentCount: gc.isForAllStudents ? 'All Students' : (gc.studentIds?.length || 0),
+      teacherInClass: gc.teacherInClass || false, // CRITICAL: Include this!
+      canJoin: gc.status === 'LIVE' && gc.teacherInClass === true, // Only allow join if teacher is in class
+      settings: {
+        allowStudentVideo: gc.allowStudentVideo,
+        allowStudentAudio: gc.allowStudentAudio,
+        allowChat: gc.allowChat,
+        allowScreenShare: gc.allowScreenShare,
+        muteOnJoin: gc.muteOnJoin
+      },
+      colorHex: gc.colorHex,
+      createdAt: gc.createdAt
+    }));
+    
+    res.json({ success: true, classes: formatted });
+  } catch (error) {
+    console.error('Get student group classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch group classes' });
   }
 });
 
@@ -10395,6 +10453,7 @@ app.post('/api/jitsi/rooms/:roomId/start', authRequired, requireRole('TEACHER'),
 });
 
 // Teacher joins the class - enables students to join
+// Teacher joins the class - enables students to join
 app.post('/api/group-classes/:id/teacher-joined', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
     const groupClass = await GroupClass.findOne({ 
@@ -10415,21 +10474,25 @@ app.post('/api/group-classes/:id/teacher-joined', authRequired, requireRole('TEA
     groupClass.teacherJoinedAt = new Date();
     await groupClass.save();
     
+    // Get teacher name
+    const teacher = await User.findById(req.userId).select('name');
+    
     // Notify all enrolled students that they can now join
     const studentIds = groupClass.isForAllStudents 
-      ? (await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })).map(l => l.studentId)
-      : groupClass.studentIds;
+      ? (await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })).map(l => l.studentId.toString())
+      : groupClass.studentIds.map(id => id.toString());
     
+    // Emit to each student's personal room
     studentIds.forEach(studentId => {
-      io.to(studentId.toString()).emit('class-ready-to-join', {
+      io.to(studentId).emit('class-ready-to-join', {
         classId: groupClass._id.toString(),
         sessionId: groupClass.sessionId,
         title: groupClass.title,
-        teacherName: req.userName || 'Teacher'
+        teacherName: teacher?.name || 'Teacher'
       });
     });
     
-    console.log(`👨‍🏫 Teacher joined class: ${groupClass.title}`);
+    console.log(`👨‍🏫 Teacher joined class: ${groupClass.title} - ${studentIds.length} students notified`);
     
     res.json({ 
       success: true, 
@@ -10442,6 +10505,7 @@ app.post('/api/group-classes/:id/teacher-joined', authRequired, requireRole('TEA
   }
 });
 
+// Teacher leaves the class - ends class for everyone
 // Teacher leaves the class - ends class for everyone
 app.post('/api/group-classes/:id/teacher-left', authRequired, requireRole('TEACHER'), async (req, res) => {
   try {
@@ -10458,16 +10522,31 @@ app.post('/api/group-classes/:id/teacher-left', authRequired, requireRole('TEACH
     groupClass.teacherInClass = false;
     groupClass.status = 'ENDED';
     groupClass.endedAt = new Date();
+    groupClass.isActive = false; // Mark as inactive so it doesn't show in dashboard
     await groupClass.save();
     
-    // Notify all participants that class has ended
+    // Get all enrolled students to notify them
+    const studentIds = groupClass.isForAllStudents 
+      ? (await TeacherStudentLink.find({ teacherId: req.userId, isActive: true })).map(l => l.studentId.toString())
+      : groupClass.studentIds.map(id => id.toString());
+    
+    // Notify all participants that class has ended via their user rooms
+    studentIds.forEach(studentId => {
+      io.to(studentId).emit('class-ended', {
+        classId: groupClass._id.toString(),
+        sessionId: groupClass.sessionId,
+        reason: 'Teacher ended the class'
+      });
+    });
+    
+    // Also broadcast globally for any connected clients
     io.emit('class-ended', {
       classId: groupClass._id.toString(),
       sessionId: groupClass.sessionId,
       reason: 'Teacher ended the class'
     });
     
-    console.log(`🏁 Teacher ended class: ${groupClass.title}`);
+    console.log(`🏁 Teacher ended class: ${groupClass.title} - notified ${studentIds.length} students`);
     
     res.json({ success: true, message: 'Class ended' });
   } catch (error) {
