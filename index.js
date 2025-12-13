@@ -1412,75 +1412,7 @@ const getInviteLink = (inviteCode) => {
   return `${baseUrl}/join/${inviteCode}`;
 };
 
-// ========= OTP HELPER FUNCTIONS =========
 
-// Send Email OTP
-const sendEmailOTP = async (email, otp, purpose) => {
-  const subjects = {
-    'SIGNUP': 'Verify Your Email - TuitionManager',
-    'LOGIN': 'Login Verification - TuitionManager',
-    'RESET_PASSWORD': 'Reset Your Password - TuitionManager',
-    '2FA_SETUP': 'Two-Factor Authentication Setup - TuitionManager'
-  };
-  
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: subjects[purpose] || 'OTP Verification - TuitionManager',
-    html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0;">
-          <h1 style="color: white; margin: 0; text-align: center;">🎓 TuitionManager</h1>
-        </div>
-        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
-          <h2 style="color: #333;">Your Verification Code</h2>
-          <p style="color: #666; font-size: 16px;">Use the following OTP to ${purpose === 'RESET_PASSWORD' ? 'reset your password' : 'verify your account'}:</p>
-          <div style="background: #667eea; color: white; font-size: 32px; font-weight: bold; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
-            ${otp}
-          </div>
-          <p style="color: #999; font-size: 14px;">This code expires in 10 minutes. Do not share this code with anyone.</p>
-          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="color: #999; font-size: 12px; text-align: center;">If you didn't request this, please ignore this email.</p>
-        </div>
-      </div>
-    `
-  };
-  
-  try {
-    await emailTransporter.sendMail(mailOptions);
-    return { success: true };
-  } catch (error) {
-    console.error('Email OTP error:', error);
-    return { success: false, error: error.message };
-  }
-};
-
-// Send SMS OTP via Twilio
-const sendSmsOTP = async (mobile, otp, purpose) => {
-  if (!twilioClient) {
-    console.error('Twilio not configured');
-    return { success: false, error: 'SMS service not configured' };
-  }
-  
-  const messages = {
-    'SIGNUP': `Your TuitionManager verification code is: ${otp}. Valid for 10 minutes.`,
-    'LOGIN': `Your TuitionManager login code is: ${otp}. Valid for 10 minutes.`,
-    'RESET_PASSWORD': `Your password reset code is: ${otp}. Valid for 10 minutes.`,
-    '2FA_SETUP': `Your 2FA setup code is: ${otp}. Valid for 10 minutes.`
-  };
-  
-  try {
-    await twilioClient.messages.create({
-      body: messages[purpose] || `Your OTP is: ${otp}`,
-      from: TWILIO_PHONE_NUMBER,
-      to: mobile
-    });
-    return { success: true };
-  } catch (error) {
-    console.error('SMS OTP error:', error);
-    return { success: false, error: error.message };
-  }
-};
 
 // Generate backup codes for 2FA
 const generateBackupCodes = () => {
