@@ -6372,7 +6372,7 @@ app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), asyn
   teacherAvatar: c.teacherId?.avatar,
   status: c.status,
   sessionId: c.sessionId,
-  teacherInClass: c.teacherInClass || false,  // ADD THIS LINE
+  teacherInClass: c.teacherInClass || false,  // ← ADD THIS LINE
   settings: {
     allowStudentVideo: c.allowStudentVideo,
     allowStudentAudio: c.allowStudentAudio,
@@ -6381,7 +6381,7 @@ app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), asyn
     muteOnJoin: c.muteOnJoin
   },
   colorHex: c.colorHex,
-  canJoin: c.status === 'LIVE' && c.teacherInClass === true,  // UPDATE THIS LINE
+  canJoin: c.status === 'LIVE' && c.teacherInClass === true,  // ← CHANGE THIS LINE
   canJoinAt: canJoinAt.toISOString(),
   inWaitingRoom: inWaitingRoom,
   createdAt: c.createdAt
