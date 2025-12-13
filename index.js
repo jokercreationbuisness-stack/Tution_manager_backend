@@ -9469,18 +9469,7 @@ app.get('/api/admin/security/2fa', adminAuthRequired, async (req, res) => {
   }
 });
 
-// ========= 2FA AUTHENTICATION ENDPOINTS =========
-const QRCode = require('qrcode');
 
-// Generate backup codes helper
-function generateBackupCodes(count = 10) {
-  const codes = [];
-  for (let i = 0; i < count; i++) {
-    codes.push(Math.random().toString(36).substring(2, 6).toUpperCase() + '-' + 
-               Math.random().toString(36).substring(2, 6).toUpperCase());
-  }
-  return codes;
-}
 
 // Setup 2FA - Generate secret and QR code
 app.post('/api/admin/security/2fa/setup', adminAuthRequired, async (req, res) => {
