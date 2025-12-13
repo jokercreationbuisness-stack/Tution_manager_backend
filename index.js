@@ -5653,6 +5653,27 @@ app.get('/api/users/blocked', authRequired, async (req, res) => {
   }
 });
 
+// Check if specific user is blocked
+app.get('/api/users/block-status/:userId', authRequired, async (req, res) => {
+  try {
+    const blockerId = req.userId;
+    const blockedId = req.params.userId;
+    
+    const isBlocked = await UserBlock.exists({ 
+      blockerId, 
+      blockedId 
+    });
+    
+    res.json({ 
+      success: true, 
+      isBlocked: !!isBlocked 
+    });
+  } catch (error) {
+    console.error('Check block status error:', error);
+    res.status(500).json({ error: 'Failed to check block status' });
+  }
+});
+
 // ========= PROFILE PICTURE UPLOAD =========
 app.post('/api/users/avatar', authRequired, upload.single('avatar'), async (req, res) => {
   try {
