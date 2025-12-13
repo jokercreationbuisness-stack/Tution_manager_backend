@@ -21,30 +21,119 @@ const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
-const nodemailer = require('nodemailer');
-const twilio = require('twilio');
+
+// ========= RESEND EMAIL SERVICE (Unlimited Free Tier) =========
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Generate 6-digit OTP
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Generate backup codes for 2FA
+const generateBackupCodes = () => {
+  const codes = [];
+  for (let i = 0; i < 10; i++) {
+    codes.push({
+      code: crypto.randomBytes(4).toString('hex').toUpperCase(),
+      used: false
+    });
+  }
+  return codes;
+};
+
+// Send Email OTP via Resend (FREE - unlimited on free tier)
+const sendEmailOTP = async (email, otp, purpose) => {
+  try {
+    const purposeText = {
+      'SIGNUP': 'verify your TuitionManager account',
+      'RESET_PASSWORD': 'reset your TuitionManager password',
+      'LOGIN': 'login to your TuitionManager account'
+    };
+    
+    await resend.emails.send({
+      from: 'TuitionManager <onboarding@resend.dev>', // Free tier uses this
+      to: email,
+      subject: `Your OTP Code - ${otp}`,
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f5;">
+          <div style="max-width: 500px; margin: 40px auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%); padding: 32px; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 28px;">TuitionManager</h1>
+              <p style="color: rgba(255,255,255,0.9); margin: 8px 0 0 0; font-size: 14px;">Your Learning Companion</p>
+            </div>
+            
+            <!-- Content -->
+            <div style="padding: 40px 32px;">
+              <p style="color: #374151; font-size: 16px; margin: 0 0 24px 0;">
+                Use this code to ${purposeText[purpose] || 'verify your account'}:
+              </p>
+              
+              <!-- OTP Box -->
+              <div style="background: linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 100%); border-radius: 12px; padding: 24px; text-align: center; margin-bottom: 24px;">
+                <span style="font-size: 40px; font-weight: bold; letter-spacing: 12px; color: #4F46E5; font-family: 'Courier New', monospace;">${otp}</span>
+              </div>
+              
+              <!-- Warning -->
+              <div style="background: #FEF3C7; border-left: 4px solid #F59E0B; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 24px;">
+                <p style="color: #92400E; font-size: 13px; margin: 0;">
+                  ⏰ This code expires in <strong>10 minutes</strong>. Don't share it with anyone.
+                </p>
+              </div>
+              
+              <p style="color: #6B7280; font-size: 14px; margin: 0;">
+                If you didn't request this code, please ignore this email.
+              </p>
+            </div>
+            
+            <!-- Footer -->
+            <div style="background: #F9FAFB; padding: 20px 32px; text-align: center; border-top: 1px solid #E5E7EB;">
+              <p style="color: #9CA3AF; font-size: 12px; margin: 0;">
+                © ${new Date().getFullYear()} TuitionManager. All rights reserved.
+              </p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `
+    });
+    
+    console.log(`📧 Email OTP sent to ${email}`);
+    return { success: true };
+  } catch (error) {
+    console.error('Email send error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// Verify Google Token
+const verifyGoogleToken = async (idToken) => {
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: GOOGLE_CLIENT_ID
+    });
+    return ticket.getPayload();
+  } catch (error) {
+    console.error('Google token verification error:', error);
+    return null;
+  }
+};
 
 // Google OAuth Configuration
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// Twilio Configuration for SMS OTP
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
-const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN 
-  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) 
-  : null;
 
-// Email Configuration (Gmail SMTP or any SMTP)
-const emailTransporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_APP_PASSWORD // Use App Password for Gmail
-  }
-});
 
 // Jitsi JWT Configuration - Add these environment variables or use defaults
 const JITSI_APP_ID = process.env.JITSI_APP_ID || 'tuition_manager_app';
@@ -12973,6 +13062,8 @@ app.post('/api/auth/signup/send-otp', async (req, res) => {
 
 // Verify OTP and complete signup
 // Accepts FIREBASE_VERIFIED for both email and SMS
+// Verify OTP and complete signup
+// Email OTP verified by backend, SMS OTP verified by Firebase (Google)
 app.post('/api/auth/signup/verify', async (req, res) => {
   try {
     const { name, email, mobile, password, role, emailOtp, smsOtp } = req.body;
@@ -12991,15 +13082,38 @@ app.post('/api/auth/signup/verify', async (req, res) => {
       return res.status(409).json({ error: 'An account with this email already exists' });
     }
     
-    // Accept FIREBASE_VERIFIED - Firebase Email Link verified on client
-    if (emailOtp !== 'FIREBASE_VERIFIED') {
-      return res.status(400).json({ error: 'Email verification required via Google Firebase' });
+    // Verify Email OTP was verified in database
+    const emailOtpRecord = await OTP.findOne({ 
+      email: email.toLowerCase(), 
+      purpose: 'SIGNUP', 
+      type: 'EMAIL',
+      verified: true 
+    });
+    
+    if (!emailOtpRecord) {
+      // If not pre-verified, verify now with the provided OTP
+      const otpRecord = await OTP.findOne({ 
+        email: email.toLowerCase(), 
+        purpose: 'SIGNUP', 
+        type: 'EMAIL' 
+      });
+      
+      if (!otpRecord) {
+        return res.status(400).json({ error: 'Please request an email OTP first' });
+      }
+      
+      const isValidOtp = await bcrypt.compare(emailOtp, otpRecord.otp);
+      if (!isValidOtp) {
+        otpRecord.attempts += 1;
+        await otpRecord.save();
+        return res.status(400).json({ error: 'Invalid email OTP' });
+      }
     }
     
     // For teachers, verify SMS was done via Firebase
     if (role === 'TEACHER' && mobile) {
       if (smsOtp !== 'FIREBASE_VERIFIED') {
-        return res.status(400).json({ error: 'Phone verification required via Google Firebase' });
+        return res.status(400).json({ error: 'Phone verification required via Firebase' });
       }
     }
     
@@ -13023,6 +13137,9 @@ app.post('/api/auth/signup/verify', async (req, res) => {
       isEmailVerified: true,
       isMobileVerified: role === 'TEACHER' && !!mobile
     });
+    
+    // Cleanup OTPs
+    await OTP.deleteMany({ email: email.toLowerCase(), purpose: 'SIGNUP' });
     
     // Generate JWT
     const token = jwt.sign(
@@ -13309,7 +13426,7 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
 
 // ========= FORGOT PASSWORD (Firebase Verified) =========
 
-// Request password reset - Now just tells client to use Firebase
+// Request password reset - Send email OTP or tell client to use Firebase for SMS
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email, mobile } = req.body;
@@ -13318,14 +13435,48 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       return res.status(400).json({ error: 'Email or mobile required' });
     }
     
-    // Find user (don't reveal if user exists for security)
+    // Find user
     const query = email ? { email: email.toLowerCase() } : { mobile };
     const user = await User.findOne(query);
     
-    // Always return success to not reveal if user exists
+    if (!user) {
+      // Don't reveal if user exists - but still return success
+      return res.json({ 
+        success: true, 
+        message: 'If an account exists, you will receive an OTP',
+        otpType: email ? 'EMAIL' : 'SMS'
+      });
+    }
+    
+    if (email) {
+      // Send email OTP via Resend
+      const otp = generateOTP();
+      const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+      
+      const emailResult = await sendEmailOTP(email, otp, 'RESET_PASSWORD');
+      if (!emailResult.success) {
+        return res.status(500).json({ error: 'Failed to send OTP' });
+      }
+      
+      await OTP.findOneAndUpdate(
+        { email: email.toLowerCase(), purpose: 'RESET_PASSWORD', type: 'EMAIL' },
+        {
+          userId: user._id,
+          email: email.toLowerCase(),
+          otp: await bcrypt.hash(otp, 10),
+          type: 'EMAIL',
+          purpose: 'RESET_PASSWORD',
+          attempts: 0,
+          expiresAt: otpExpiry
+        },
+        { upsert: true }
+      );
+    }
+    // For mobile, Firebase will handle OTP on client side
+    
     res.json({ 
       success: true, 
-      message: 'If an account exists, please verify via Firebase',
+      message: email ? 'OTP sent to email' : 'Please verify via Firebase',
       otpType: email ? 'EMAIL' : 'SMS'
     });
     
@@ -13337,17 +13488,14 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
 // Verify OTP and get reset token
 // Accepts FIREBASE_VERIFIED - Firebase handled verification on client
+// Verify OTP and get reset token
+// Email OTP verified by backend, Phone OTP verified by Firebase
 app.post('/api/auth/forgot-password/verify', async (req, res) => {
   try {
     const { email, mobile, otp } = req.body;
     
     if ((!email && !mobile) || !otp) {
       return res.status(400).json({ error: 'OTP and email/mobile required' });
-    }
-    
-    // Accept FIREBASE_VERIFIED - Firebase verified on client side
-    if (otp !== 'FIREBASE_VERIFIED') {
-      return res.status(400).json({ error: 'Verification required via Google Firebase' });
     }
     
     // Find user
@@ -13358,6 +13506,38 @@ app.post('/api/auth/forgot-password/verify', async (req, res) => {
       return res.status(400).json({ error: 'Account not found' });
     }
     
+    if (mobile) {
+      // Phone OTP - Accept FIREBASE_VERIFIED
+      if (otp !== 'FIREBASE_VERIFIED') {
+        return res.status(400).json({ error: 'Phone verification required via Firebase' });
+      }
+    } else {
+      // Email OTP - Verify with backend
+      const otpRecord = await OTP.findOne({ 
+        email: email.toLowerCase(), 
+        purpose: 'RESET_PASSWORD', 
+        type: 'EMAIL' 
+      });
+      
+      if (!otpRecord) {
+        return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+      }
+      
+      if (otpRecord.attempts >= 5) {
+        return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
+      }
+      
+      const isValid = await bcrypt.compare(otp, otpRecord.otp);
+      if (!isValid) {
+        otpRecord.attempts += 1;
+        await otpRecord.save();
+        return res.status(400).json({ error: 'Invalid OTP' });
+      }
+      
+      // Delete used OTP
+      await OTP.deleteOne({ _id: otpRecord._id });
+    }
+    
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     
@@ -13365,7 +13545,7 @@ app.post('/api/auth/forgot-password/verify', async (req, res) => {
       userId: user._id,
       token: resetToken,
       otpVerified: true,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
     });
     
     res.json({
@@ -13477,6 +13657,104 @@ app.post('/api/auth/login/enhanced', async (req, res) => {
   } catch (error) {
     console.error('Enhanced login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// ========= EMAIL OTP ENDPOINTS (Backend sends email via Resend) =========
+
+// Send Email OTP
+app.post('/api/auth/email/send-otp', async (req, res) => {
+  try {
+    const { email, purpose } = req.body;
+    
+    if (!email || !purpose) {
+      return res.status(400).json({ error: 'Email and purpose required' });
+    }
+    
+    if (!['SIGNUP', 'RESET_PASSWORD', 'LOGIN'].includes(purpose)) {
+      return res.status(400).json({ error: 'Invalid purpose' });
+    }
+    
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    
+    // Send email via Resend
+    const emailResult = await sendEmailOTP(email, otp, purpose);
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send email: ' + emailResult.error });
+    }
+    
+    // Store OTP in database
+    await OTP.findOneAndUpdate(
+      { email: email.toLowerCase(), purpose, type: 'EMAIL' },
+      {
+        email: email.toLowerCase(),
+        otp: await bcrypt.hash(otp, 10),
+        type: 'EMAIL',
+        purpose,
+        verified: false,
+        attempts: 0,
+        expiresAt: otpExpiry
+      },
+      { upsert: true }
+    );
+    
+    res.json({ success: true, message: 'OTP sent to email' });
+    
+  } catch (error) {
+    console.error('Send email OTP error:', error);
+    res.status(500).json({ error: 'Failed to send OTP' });
+  }
+});
+
+// Verify Email OTP
+app.post('/api/auth/email/verify-otp', async (req, res) => {
+  try {
+    const { email, otp, purpose } = req.body;
+    
+    if (!email || !otp || !purpose) {
+      return res.status(400).json({ error: 'Email, OTP and purpose required', verified: false });
+    }
+    
+    const otpRecord = await OTP.findOne({ 
+      email: email.toLowerCase(), 
+      purpose, 
+      type: 'EMAIL' 
+    });
+    
+    if (!otpRecord) {
+      return res.status(400).json({ error: 'OTP expired or not found', verified: false });
+    }
+    
+    // Check expiry
+    if (new Date() > otpRecord.expiresAt) {
+      await OTP.deleteOne({ _id: otpRecord._id });
+      return res.status(400).json({ error: 'OTP expired', verified: false });
+    }
+    
+    // Check attempts
+    if (otpRecord.attempts >= 5) {
+      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.', verified: false });
+    }
+    
+    // Verify OTP
+    const isValid = await bcrypt.compare(otp, otpRecord.otp);
+    
+    if (!isValid) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return res.status(400).json({ error: 'Invalid OTP', verified: false });
+    }
+    
+    // Mark as verified
+    otpRecord.verified = true;
+    await otpRecord.save();
+    
+    res.json({ success: true, verified: true, message: 'Email verified' });
+    
+  } catch (error) {
+    console.error('Verify email OTP error:', error);
+    res.status(500).json({ error: 'Verification failed', verified: false });
   }
 });
 
