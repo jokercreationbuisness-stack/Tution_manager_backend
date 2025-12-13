@@ -3612,6 +3612,145 @@ app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req
   }
 });
 
+// ========= STUDENT CLASSES ENDPOINT - FIXED =========
+// Get all classes for student (both regular and group classes organized by day)
+app.get('/api/student/classes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    // 1. Get all linked teachers for this student
+    const links = await TeacherStudentLink.find({ 
+      studentId: req.userId, 
+      isActive: true,
+      isBlocked: false 
+    }).select('teacherId');
+    
+    const teacherIds = links.map(link => link.teacherId);
+    
+    if (teacherIds.length === 0) {
+      return res.json({ 
+        success: true, 
+        classes: [],
+        message: 'No linked teachers found'
+      });
+    }
+    
+    // 2. Get regular classes from linked teachers
+    // - Classes with scope 'ALL' from linked teachers
+    // - Classes with scope 'INDIVIDUAL' specifically for this student
+    const regularClasses = await ClassModel.find({
+      teacherId: { $in: teacherIds },
+      isActive: true,
+      $or: [
+        { scope: 'ALL' },
+        { scope: 'INDIVIDUAL', studentId: req.userId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .lean();
+    
+    // 3. Format regular classes with type and day info
+    const formattedClasses = regularClasses.map(cls => ({
+      id: cls._id.toString(),
+      type: 'REGULAR',
+      subject: cls.subject,
+      title: cls.title || cls.subject,
+      dayOfWeek: cls.dayOfWeek, // 1=Monday, 7=Sunday
+      startTime: cls.startTime,
+      endTime: cls.endTime,
+      colorHex: cls.colorHex || '#3B82F6',
+      notes: cls.notes,
+      location: cls.location,
+      teacherName: cls.teacherId?.name || 'Unknown Teacher',
+      teacherAvatar: cls.teacherId?.avatar,
+      scope: cls.scope,
+      createdAt: cls.createdAt
+    }));
+    
+    console.log(`📚 Student ${req.userId} fetched ${formattedClasses.length} regular classes from ${teacherIds.length} teachers`);
+    
+    res.json({
+      success: true,
+      classes: formattedClasses
+    });
+    
+  } catch (error) {
+    console.error('Get student classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch classes' });
+  }
+});
+
+// ========= STUDENT GROUP CLASSES - ENHANCED WITH DAY INFO =========
+app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    // Get linked teacher IDs
+    const links = await TeacherStudentLink.find({ 
+      studentId: req.userId, 
+      isActive: true,
+      isBlocked: false
+    }).select('teacherId');
+    
+    const teacherIds = links.map(link => link.teacherId);
+    
+    // Find group classes where student is enrolled or class is for all students
+    const groupClasses = await GroupClass.find({
+      $or: [
+        { teacherId: { $in: teacherIds }, isForAllStudents: true },
+        { studentIds: req.userId },
+        { teacherId: { $in: teacherIds }, sectionId: { $exists: true } }
+      ],
+      isActive: true,
+      status: { $in: ['SCHEDULED', 'LIVE'] } // Only active classes
+    })
+    .populate('teacherId', 'name avatar')
+    .populate('sectionId', 'name')
+    .sort({ scheduledAt: 1 })
+    .lean();
+    
+    // Format with dayOfWeek extracted from scheduledAt
+    const formattedClasses = groupClasses.map(cls => {
+      // Extract day of week from scheduledAt (1=Monday, 7=Sunday)
+      const scheduledDate = new Date(cls.scheduledAt);
+      let dayOfWeek = scheduledDate.getDay(); // 0=Sunday, 1=Monday, etc.
+      // Convert to backend format: 1=Monday, 7=Sunday
+      dayOfWeek = dayOfWeek === 0 ? 7 : dayOfWeek;
+      
+      return {
+        id: cls._id.toString(),
+        type: 'GROUP',
+        title: cls.title,
+        subject: cls.subject,
+        description: cls.description,
+        dayOfWeek: dayOfWeek, // Added for day filtering
+        scheduledAt: cls.scheduledAt,
+        duration: cls.duration,
+        status: cls.status,
+        sessionId: cls.sessionId,
+        colorHex: cls.colorHex || '#10B981',
+        teacherName: cls.teacherId?.name || 'Unknown Teacher',
+        teacherAvatar: cls.teacherId?.avatar,
+        sectionName: cls.sectionId?.name,
+        teacherInClass: cls.teacherInClass || false,
+        settings: {
+          allowStudentVideo: cls.allowStudentVideo,
+          allowStudentAudio: cls.allowStudentAudio,
+          allowChat: cls.allowChat,
+          allowWhiteboard: cls.allowWhiteboard
+        }
+      };
+    });
+    
+    console.log(`📺 Student ${req.userId} fetched ${formattedClasses.length} group classes`);
+    
+    res.json({
+      success: true,
+      classes: formattedClasses
+    });
+    
+  } catch (error) {
+    console.error('Get student group classes error:', error);
+    res.status(500).json({ error: 'Failed to fetch group classes' });
+  }
+});
+
 app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
   try {
     const studentId = req.userId;
