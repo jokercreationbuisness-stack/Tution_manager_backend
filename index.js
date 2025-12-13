@@ -9478,8 +9478,6 @@ app.get('/api/admin/security/2fa', adminAuthRequired, async (req, res) => {
 });
 
 // ========= 2FA AUTHENTICATION ENDPOINTS =========
-
-const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 
 // Generate backup codes helper
