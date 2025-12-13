@@ -5654,6 +5654,7 @@ app.get('/api/users/blocked', authRequired, async (req, res) => {
 });
 
 // Check if specific user is blocked
+// Check if specific user is blocked
 app.get('/api/users/block-status/:userId', authRequired, async (req, res) => {
   try {
     const blockerId = req.userId;
