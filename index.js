@@ -11301,6 +11301,422 @@ app.post('/api/admin/setup/initial', async (req, res) => {
 });
 
 // ========================================
+// ========= USER-FACING APP APIs (For Mobile App) =========
+// ========================================
+
+// ========= SUPPORT TICKETS (User-facing) =========
+
+// Create a support ticket (User)
+app.post('/api/support/tickets', authRequired, async (req, res) => {
+  try {
+    const { subject, message, priority } = req.body;
+    
+    if (!subject || !message) {
+      return res.status(400).json({ error: 'Subject and message are required' });
+    }
+    
+    // Generate ticket number
+    const count = await SupportTicket.countDocuments();
+    const ticketNumber = `TKT${String(count + 1).padStart(6, '0')}`;
+    
+    const ticket = await SupportTicket.create({
+      ticketNumber,
+      userId: req.userId,
+      subject,
+      priority: priority || 'medium',
+      status: 'open'
+    });
+    
+    // Create first message
+    const user = await User.findById(req.userId).select('name');
+    await SupportMessage.create({
+      ticketId: ticket._id,
+      senderId: req.userId,
+      senderType: 'user',
+      senderName: user?.name || 'User',
+      content: message
+    });
+    
+    res.status(201).json({
+      success: true,
+      ticketId: ticket._id.toString(),
+      ticketNumber: ticket.ticketNumber
+    });
+  } catch (error) {
+    console.error('Create ticket error:', error);
+    res.status(500).json({ error: 'Failed to create ticket' });
+  }
+});
+
+// Get my support tickets (User)
+app.get('/api/support/tickets', authRequired, async (req, res) => {
+  try {
+    const tickets = await SupportTicket.find({ userId: req.userId })
+      .sort({ lastMessageAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      tickets: tickets.map(t => ({
+        id: t._id.toString(),
+        ticketNumber: t.ticketNumber,
+        subject: t.subject,
+        status: t.status,
+        priority: t.priority,
+        lastMessageAt: t.lastMessageAt,
+        unreadUserCount: t.unreadUserCount || 0,
+        createdAt: t.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Get tickets error:', error);
+    res.status(500).json({ error: 'Failed to fetch tickets' });
+  }
+});
+
+// Get ticket details with messages (User)
+app.get('/api/support/tickets/:ticketId', authRequired, async (req, res) => {
+  try {
+    const ticket = await SupportTicket.findOne({
+      _id: req.params.ticketId,
+      userId: req.userId
+    }).lean();
+    
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    const messages = await SupportMessage.find({ ticketId: ticket._id })
+      .sort({ createdAt: 1 })
+      .lean();
+    
+    // Mark as read
+    await SupportTicket.findByIdAndUpdate(ticket._id, { unreadUserCount: 0 });
+    await SupportMessage.updateMany(
+      { ticketId: ticket._id, senderType: 'admin', isRead: false },
+      { isRead: true }
+    );
+    
+    res.json({
+      success: true,
+      ticket: {
+        id: ticket._id.toString(),
+        ticketNumber: ticket.ticketNumber,
+        subject: ticket.subject,
+        status: ticket.status,
+        priority: ticket.priority,
+        createdAt: ticket.createdAt
+      },
+      messages: messages.map(m => ({
+        id: m._id.toString(),
+        senderId: m.senderId,
+        senderType: m.senderType,
+        senderName: m.senderName,
+        content: m.content,
+        attachmentUrl: m.attachmentUrl,
+        attachmentType: m.attachmentType,
+        isRead: m.isRead,
+        createdAt: m.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Get ticket details error:', error);
+    res.status(500).json({ error: 'Failed to fetch ticket' });
+  }
+});
+
+// Send message to ticket (User)
+app.post('/api/support/tickets/:ticketId/messages', authRequired, async (req, res) => {
+  try {
+    const { content, attachmentUrl, attachmentType } = req.body;
+    
+    if (!content) {
+      return res.status(400).json({ error: 'Message content is required' });
+    }
+    
+    const ticket = await SupportTicket.findOne({
+      _id: req.params.ticketId,
+      userId: req.userId
+    });
+    
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    if (ticket.status === 'closed') {
+      return res.status(400).json({ error: 'Cannot send message to closed ticket' });
+    }
+    
+    const user = await User.findById(req.userId).select('name');
+    
+    const message = await SupportMessage.create({
+      ticketId: ticket._id,
+      senderId: req.userId,
+      senderType: 'user',
+      senderName: user?.name || 'User',
+      content,
+      attachmentUrl,
+      attachmentType
+    });
+    
+    // Update ticket
+    ticket.lastMessageAt = new Date();
+    ticket.unreadAdminCount = (ticket.unreadAdminCount || 0) + 1;
+    if (ticket.status === 'resolved') {
+      ticket.status = 'open'; // Reopen if user responds
+    }
+    await ticket.save();
+    
+    res.json({
+      success: true,
+      messageId: message._id.toString()
+    });
+  } catch (error) {
+    console.error('Send message error:', error);
+    res.status(500).json({ error: 'Failed to send message' });
+  }
+});
+
+// Close ticket (User)
+app.post('/api/support/tickets/:ticketId/close', authRequired, async (req, res) => {
+  try {
+    const ticket = await SupportTicket.findOne({
+      _id: req.params.ticketId,
+      userId: req.userId
+    });
+    
+    if (!ticket) {
+      return res.status(404).json({ error: 'Ticket not found' });
+    }
+    
+    ticket.status = 'closed';
+    ticket.updatedAt = new Date();
+    await ticket.save();
+    
+    res.json({ success: true, message: 'Ticket closed' });
+  } catch (error) {
+    console.error('Close ticket error:', error);
+    res.status(500).json({ error: 'Failed to close ticket' });
+  }
+});
+
+// ========= LEGAL DOCUMENTS (Public) =========
+
+// Get legal document by type
+app.get('/api/legal/:type', async (req, res) => {
+  try {
+    const validTypes = ['privacy_policy', 'terms_conditions', 'refund_policy', 'cookie_policy', 'gdpr'];
+    
+    if (!validTypes.includes(req.params.type)) {
+      return res.status(400).json({ error: 'Invalid document type' });
+    }
+    
+    const document = await LegalDocument.findOne({
+      type: req.params.type,
+      isPublished: true
+    }).lean();
+    
+    if (!document) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    
+    res.json({
+      success: true,
+      document: {
+        type: document.type,
+        title: document.title,
+        content: document.content,
+        version: document.version,
+        publishedAt: document.publishedAt
+      }
+    });
+  } catch (error) {
+    console.error('Get legal document error:', error);
+    res.status(500).json({ error: 'Failed to fetch document' });
+  }
+});
+
+// Get all legal documents
+app.get('/api/legal', async (req, res) => {
+  try {
+    const documents = await LegalDocument.find({ isPublished: true })
+      .select('type title version publishedAt')
+      .lean();
+    
+    res.json({
+      success: true,
+      documents: documents.map(d => ({
+        type: d.type,
+        title: d.title,
+        version: d.version,
+        publishedAt: d.publishedAt
+      }))
+    });
+  } catch (error) {
+    console.error('Get legal documents error:', error);
+    res.status(500).json({ error: 'Failed to fetch documents' });
+  }
+});
+
+// ========= FEATURE FLAGS (User-facing) =========
+
+// Get all feature flags for user
+app.get('/api/app/feature-flags', authRequired, async (req, res) => {
+  try {
+    const flags = await FeatureFlag.find({ isEnabled: true }).lean();
+    
+    const result = {};
+    flags.forEach(flag => {
+      result[flag.key] = {
+        key: flag.key,
+        name: flag.name,
+        isEnabled: flag.isEnabled,
+        targetAudience: flag.targetAudience
+      };
+    });
+    
+    res.json({ success: true, flags: result });
+  } catch (error) {
+    console.error('Get feature flags error:', error);
+    res.status(500).json({ error: 'Failed to fetch feature flags' });
+  }
+});
+
+// Get single feature flag
+app.get('/api/app/feature-flags/:key', authRequired, async (req, res) => {
+  try {
+    const flag = await FeatureFlag.findOne({ key: req.params.key }).lean();
+    
+    if (!flag) {
+      return res.json({ success: true, flag: { key: req.params.key, isEnabled: true } });
+    }
+    
+    res.json({
+      success: true,
+      flag: {
+        key: flag.key,
+        name: flag.name,
+        isEnabled: flag.isEnabled,
+        targetAudience: flag.targetAudience
+      }
+    });
+  } catch (error) {
+    console.error('Get feature flag error:', error);
+    res.status(500).json({ error: 'Failed to fetch feature flag' });
+  }
+});
+
+// ========= APP CONFIG (User-facing) =========
+
+// Get app config (non-secret values only)
+app.get('/api/app/config', async (req, res) => {
+  try {
+    const configs = await AppConfig.find({ isSecret: false }).lean();
+    
+    const result = {};
+    configs.forEach(c => {
+      result[c.key] = c.value;
+    });
+    
+    res.json({ success: true, configs: result });
+  } catch (error) {
+    console.error('Get app config error:', error);
+    res.status(500).json({ error: 'Failed to fetch config' });
+  }
+});
+
+// ========= USER SESSIONS (User-facing) =========
+
+// Register session
+app.post('/api/sessions/register', authRequired, async (req, res) => {
+  try {
+    const { deviceType, deviceName, userAgent } = req.body;
+    
+    const session = await UserSession.create({
+      userId: req.userId,
+      deviceType,
+      deviceName,
+      userAgent,
+      ipAddress: req.ip || req.connection.remoteAddress,
+      isActive: true
+    });
+    
+    res.json({
+      success: true,
+      sessionId: session._id.toString()
+    });
+  } catch (error) {
+    console.error('Register session error:', error);
+    res.status(500).json({ error: 'Failed to register session' });
+  }
+});
+
+// Get my sessions
+app.get('/api/sessions', authRequired, async (req, res) => {
+  try {
+    const sessions = await UserSession.find({
+      userId: req.userId,
+      isActive: true
+    }).sort({ lastActivity: -1 }).lean();
+    
+    res.json({
+      success: true,
+      sessions: sessions.map(s => ({
+        id: s._id.toString(),
+        deviceType: s.deviceType,
+        deviceName: s.deviceName,
+        ipAddress: s.ipAddress,
+        location: s.location,
+        lastActivity: s.lastActivity,
+        createdAt: s.createdAt,
+        isCurrent: false // Can be determined by comparing session tokens
+      }))
+    });
+  } catch (error) {
+    console.error('Get sessions error:', error);
+    res.status(500).json({ error: 'Failed to fetch sessions' });
+  }
+});
+
+// Terminate session
+app.delete('/api/sessions/:sessionId', authRequired, async (req, res) => {
+  try {
+    const session = await UserSession.findOne({
+      _id: req.params.sessionId,
+      userId: req.userId
+    });
+    
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+    
+    session.isActive = false;
+    await session.save();
+    
+    res.json({ success: true, message: 'Session terminated' });
+  } catch (error) {
+    console.error('Terminate session error:', error);
+    res.status(500).json({ error: 'Failed to terminate session' });
+  }
+});
+
+// Session heartbeat
+app.post('/api/sessions/heartbeat', authRequired, async (req, res) => {
+  try {
+    await UserSession.findOneAndUpdate(
+      { userId: req.userId, isActive: true },
+      { lastActivity: new Date() },
+      { sort: { createdAt: -1 } }
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Session heartbeat error:', error);
+    res.status(500).json({ error: 'Failed to update session' });
+  }
+});
+
+// ========================================
 // ========= JITSI GROUP CALL APIs =========
 // ========================================
 
