@@ -1473,7 +1473,7 @@ const authRequired = (req, res, next) => {
     const token = authHeader.split(' ')[1];
     const decoded = jwt.verify(token, JWT_SECRET);
     
-    req.userId = decoded.sub;
+    req.userId = decoded.userId;
     req.role = decoded.role;
     req.userEmail = decoded.email;
     
@@ -13088,13 +13088,23 @@ app.post('/api/auth/resend-otp', async (req, res) => {
 // Setup 2FA - Generate secret
 app.post('/api/auth/2fa/setup', authRequired, async (req, res) => {
   try {
-    const existing = await TwoFactorAuth.findOne({ userId: req.userId });
+    console.log('🔐 2FA Setup requested for userId:', req.userId);
+    
+    // Convert string to ObjectId properly
+    const userId = new mongoose.Types.ObjectId(req.userId);
+    
+    const existing = await TwoFactorAuth.findOne({ userId });
     if (existing && existing.isEnabled) {
       return res.status(400).json({ error: '2FA is already enabled' });
     }
     
-    const user = await User.findById(req.userId);
+    const user = await User.findById(userId);
+    console.log('🔐 User lookup result:', user ? 'Found' : 'Not found', 'for ID:', req.userId);
+    
     if (!user) {
+      // Debug: Check if user exists with different query
+      const allUsers = await User.find({}).select('_id email').limit(5);
+      console.log('🔐 Sample users in DB:', allUsers.map(u => u._id.toString()));
       return res.status(404).json({ error: 'User not found' });
     }
     
@@ -13106,9 +13116,9 @@ app.post('/api/auth/2fa/setup', authRequired, async (req, res) => {
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
     
     await TwoFactorAuth.findOneAndUpdate(
-      { userId: req.userId },
+      { userId },
       {
-        userId: req.userId,
+        userId,
         secret: secret.base32,
         isEnabled: false,
         backupCodes: generateBackupCodes()
@@ -13647,6 +13657,48 @@ app.post('/api/auth/email/verify-otp', async (req, res) => {
   } catch (error) {
     console.error('Verify email OTP error:', error);
     res.status(500).json({ error: 'Verification failed', verified: false });
+  }
+});
+
+// ========= STUDENT CODE ENDPOINT =========
+app.get('/api/student/code', authRequired, async (req, res) => {
+  try {
+    console.log('📋 Student code requested for userId:', req.userId);
+    
+    // Convert string to ObjectId
+    const userId = new mongoose.Types.ObjectId(req.userId);
+    
+    const user = await User.findById(userId).select('studentCode role');
+    
+    if (!user) {
+      console.log('📋 User not found for ID:', req.userId);
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (user.role !== 'STUDENT') {
+      return res.status(400).json({ error: 'Only students have student codes' });
+    }
+    
+    if (!user.studentCode) {
+      // Generate one if missing
+      let studentCode;
+      do {
+        studentCode = generateStudentCode();
+      } while (await User.exists({ studentCode }));
+      
+      user.studentCode = studentCode;
+      await user.save();
+      console.log('📋 Generated new student code:', studentCode);
+    }
+    
+    res.json({ 
+      success: true, 
+      code: user.studentCode 
+    });
+    
+  } catch (error) {
+    console.error('Get student code error:', error);
+    res.status(500).json({ error: 'Failed to get student code' });
   }
 });
 
