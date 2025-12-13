@@ -372,6 +372,54 @@ const UserBlockSchema = new Schema({
 });
 UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
 
+// ========= TEACHER INVITE LINK SCHEMA =========
+// Location: Add after UserBlockSchema definition (around line 390)
+
+const TeacherInviteLinkSchema = new Schema({
+  teacherId: { type: Types.ObjectId, ref: 'User', required: true, unique: true },
+  inviteCode: { type: String, required: true, unique: true }, // 8 char unique code
+  inviteLink: { type: String }, // Full URL
+  qrCodeData: { type: String }, // Base64 QR code image (optional, can generate on client)
+  autoApprove: { type: Boolean, default: false }, // If true, auto-accept requests
+  isActive: { type: Boolean, default: true },
+  totalScans: { type: Number, default: 0 },
+  totalJoins: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+TeacherInviteLinkSchema.index({ inviteCode: 1 });
+TeacherInviteLinkSchema.index({ teacherId: 1 });
+
+// ========= LINK REQUEST SCHEMA =========
+const LinkRequestSchema = new Schema({
+  // Who is requesting
+  requesterId: { type: Types.ObjectId, ref: 'User', required: true },
+  requesterRole: { type: String, enum: ['STUDENT', 'TEACHER'], required: true },
+  
+  // Who is being requested (target)
+  targetId: { type: Types.ObjectId, ref: 'User', required: true },
+  targetRole: { type: String, enum: ['STUDENT', 'TEACHER'], required: true },
+  
+  // Request details
+  inviteCode: { type: String }, // If via invite link
+  studentCode: { type: String }, // If via student code (old method)
+  requestMethod: { type: String, enum: ['INVITE_LINK', 'STUDENT_CODE', 'DIRECT'], default: 'DIRECT' },
+  
+  // Status
+  status: { type: String, enum: ['PENDING', 'APPROVED', 'REJECTED', 'BLOCKED'], default: 'PENDING' },
+  
+  // Response info
+  respondedAt: { type: Date },
+  responseNote: { type: String },
+  
+  // Timestamps
+  createdAt: { type: Date, default: Date.now },
+  expiresAt: { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) } // 7 days
+});
+LinkRequestSchema.index({ targetId: 1, status: 1 });
+LinkRequestSchema.index({ requesterId: 1, targetId: 1 }, { unique: true });
+LinkRequestSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // Auto-delete expired
+
 // ========= SECTION & GROUP CLASS SCHEMAS =========
 
 // Section Schema - for grouping students
@@ -935,6 +983,10 @@ const Transaction = mongoose.model('Transaction', TransactionSchema);
 const PromoCode = mongoose.model('PromoCode', PromoCodeSchema);
 const SecurityEvent = mongoose.model('SecurityEvent', SecurityEventSchema);
 
+// ========= LINK REQUEST MODELS =========
+const TeacherInviteLink = mongoose.model('TeacherInviteLink', TeacherInviteLinkSchema);
+const LinkRequest = mongoose.model('LinkRequest', LinkRequestSchema);
+
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1158,6 +1210,23 @@ const logAdminAction = async (adminId, adminEmail, action, resource, resourceId,
 
 const generateSecureToken = () => {
   return require('crypto').randomBytes(64).toString('hex');
+};
+
+// ========= INVITE CODE HELPER FUNCTIONS =========
+// Location: Add after generateStudentCode function (around line 630)
+
+const generateInviteCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+};
+
+const getInviteLink = (inviteCode) => {
+  const baseUrl = process.env.APP_BASE_URL || 'https://tuitionmanager.app';
+  return `${baseUrl}/join/${inviteCode}`;
 };
 
 // ========= WEBRTC HELPER FUNCTION =========
@@ -1398,6 +1467,35 @@ io.on('connection', (socket) => {
       });
     }
   });
+
+  // Location: Add inside io.on('connection') handler (around line 2800)
+
+// ========= LINK REQUEST SOCKET EVENTS =========
+
+// Join user's personal room for notifications
+socket.on('join-personal-room', (userId) => {
+  if (userId) {
+    socket.join(userId.toString());
+    console.log(`👤 User ${userId} joined personal notification room`);
+  }
+});
+
+// Listen for request count updates
+socket.on('get-request-count', async (callback) => {
+  try {
+    if (socket.userId) {
+      const count = await LinkRequest.countDocuments({
+        targetId: socket.userId,
+        status: 'PENDING'
+      });
+      if (typeof callback === 'function') {
+        callback({ count });
+      }
+    }
+  } catch (error) {
+    console.error('Get request count error:', error);
+  }
+});
 
   socket.on('request_pending_notifications', async () => {
     try {
@@ -3041,6 +3139,835 @@ app.get('/api/teacher/students', authRequired, requireRole('TEACHER'), async (re
   } catch (error) {
     console.error('List students error:', error);
     res.status(500).json({ error: 'Failed to fetch students' });
+  }
+});
+
+// ========================================
+// ========= INVITE LINK & REQUEST APIs =========
+// ========================================
+// Location: Add after existing /api/students routes (around line 1200)
+
+// ========= TEACHER INVITE LINK APIs =========
+
+// Generate or get teacher's invite link
+app.post('/api/invite/generate', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    let inviteLink = await TeacherInviteLink.findOne({ teacherId: req.userId });
+    
+    if (!inviteLink) {
+      // Generate new invite code
+      let inviteCode;
+      let isUnique = false;
+      
+      while (!isUnique) {
+        inviteCode = generateInviteCode();
+        const existing = await TeacherInviteLink.findOne({ inviteCode });
+        if (!existing) isUnique = true;
+      }
+      
+      inviteLink = await TeacherInviteLink.create({
+        teacherId: req.userId,
+        inviteCode,
+        inviteLink: getInviteLink(inviteCode),
+        autoApprove: false
+      });
+      
+      console.log(`📎 Generated new invite link for teacher ${req.userId}: ${inviteCode}`);
+    }
+    
+    const teacher = await User.findById(req.userId).select('name');
+    
+    res.json({
+      success: true,
+      inviteCode: inviteLink.inviteCode,
+      inviteLink: inviteLink.inviteLink,
+      autoApprove: inviteLink.autoApprove,
+      isActive: inviteLink.isActive,
+      totalScans: inviteLink.totalScans,
+      totalJoins: inviteLink.totalJoins,
+      teacherName: teacher?.name,
+      createdAt: inviteLink.createdAt
+    });
+  } catch (error) {
+    console.error('Generate invite link error:', error);
+    res.status(500).json({ error: 'Failed to generate invite link' });
+  }
+});
+
+// Get teacher's invite settings
+app.get('/api/invite/settings', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const inviteLink = await TeacherInviteLink.findOne({ teacherId: req.userId });
+    
+    if (!inviteLink) {
+      return res.json({
+        success: true,
+        hasInviteLink: false,
+        autoApprove: false
+      });
+    }
+    
+    res.json({
+      success: true,
+      hasInviteLink: true,
+      inviteCode: inviteLink.inviteCode,
+      inviteLink: inviteLink.inviteLink,
+      autoApprove: inviteLink.autoApprove,
+      isActive: inviteLink.isActive,
+      totalScans: inviteLink.totalScans,
+      totalJoins: inviteLink.totalJoins
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get invite settings' });
+  }
+});
+
+// Update auto-approve setting
+app.put('/api/invite/auto-approve', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { autoApprove } = req.body;
+    
+    const inviteLink = await TeacherInviteLink.findOneAndUpdate(
+      { teacherId: req.userId },
+      { autoApprove: autoApprove === true, updatedAt: new Date() },
+      { new: true }
+    );
+    
+    if (!inviteLink) {
+      return res.status(404).json({ error: 'Invite link not found. Generate one first.' });
+    }
+    
+    console.log(`⚙️ Teacher ${req.userId} set autoApprove to ${autoApprove}`);
+    
+    res.json({
+      success: true,
+      autoApprove: inviteLink.autoApprove,
+      message: autoApprove ? 'Auto-approve enabled' : 'Manual approval required'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update setting' });
+  }
+});
+
+// Regenerate invite code
+app.post('/api/invite/regenerate', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    let inviteCode;
+    let isUnique = false;
+    
+    while (!isUnique) {
+      inviteCode = generateInviteCode();
+      const existing = await TeacherInviteLink.findOne({ inviteCode });
+      if (!existing) isUnique = true;
+    }
+    
+    const inviteLink = await TeacherInviteLink.findOneAndUpdate(
+      { teacherId: req.userId },
+      { 
+        inviteCode,
+        inviteLink: getInviteLink(inviteCode),
+        totalScans: 0,
+        updatedAt: new Date()
+      },
+      { new: true, upsert: true }
+    );
+    
+    console.log(`🔄 Regenerated invite code for teacher ${req.userId}: ${inviteCode}`);
+    
+    res.json({
+      success: true,
+      inviteCode: inviteLink.inviteCode,
+      inviteLink: inviteLink.inviteLink,
+      message: 'Invite code regenerated successfully'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to regenerate invite code' });
+  }
+});
+
+// Toggle invite link active/inactive
+app.put('/api/invite/toggle', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const inviteLink = await TeacherInviteLink.findOne({ teacherId: req.userId });
+    
+    if (!inviteLink) {
+      return res.status(404).json({ error: 'Invite link not found' });
+    }
+    
+    inviteLink.isActive = !inviteLink.isActive;
+    inviteLink.updatedAt = new Date();
+    await inviteLink.save();
+    
+    res.json({
+      success: true,
+      isActive: inviteLink.isActive,
+      message: inviteLink.isActive ? 'Invite link activated' : 'Invite link deactivated'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to toggle invite link' });
+  }
+});
+
+// ========= JOIN VIA INVITE CODE APIs =========
+
+// Get teacher info by invite code (for preview before joining)
+app.get('/api/invite/preview/:code', authRequired, async (req, res) => {
+  try {
+    const inviteLink = await TeacherInviteLink.findOne({ 
+      inviteCode: req.params.code.toUpperCase(),
+      isActive: true
+    });
+    
+    if (!inviteLink) {
+      return res.status(404).json({ error: 'Invalid or inactive invite code' });
+    }
+    
+    const teacher = await User.findById(inviteLink.teacherId)
+      .select('name avatar');
+    
+    if (!teacher) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+    
+    // Increment scan count
+    inviteLink.totalScans += 1;
+    await inviteLink.save();
+    
+    // Check if already linked
+    const existingLink = await TeacherStudentLink.findOne({
+      teacherId: inviteLink.teacherId,
+      studentId: req.userId,
+      isActive: true
+    });
+    
+    // Check if request already pending
+    const existingRequest = await LinkRequest.findOne({
+      requesterId: req.userId,
+      targetId: inviteLink.teacherId,
+      status: 'PENDING'
+    });
+    
+    res.json({
+      success: true,
+      teacher: {
+        id: teacher._id.toString(),
+        name: teacher.name,
+        avatar: teacher.avatar
+      },
+      autoApprove: inviteLink.autoApprove,
+      alreadyLinked: !!existingLink,
+      requestPending: !!existingRequest
+    });
+  } catch (error) {
+    console.error('Preview invite error:', error);
+    res.status(500).json({ error: 'Failed to get invite preview' });
+  }
+});
+
+// Join via invite code (creates request or auto-joins)
+app.post('/api/invite/join/:code', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const inviteCode = req.params.code.toUpperCase();
+    
+    const inviteLink = await TeacherInviteLink.findOne({ 
+      inviteCode,
+      isActive: true
+    });
+    
+    if (!inviteLink) {
+      return res.status(404).json({ error: 'Invalid or inactive invite code' });
+    }
+    
+    const teacherId = inviteLink.teacherId;
+    const studentId = req.userId;
+    
+    // Check if already linked
+    const existingLink = await TeacherStudentLink.findOne({
+      teacherId,
+      studentId
+    });
+    
+    if (existingLink && existingLink.isActive) {
+      return res.status(400).json({ error: 'You are already linked with this teacher' });
+    }
+    
+    // Check if blocked
+    const isBlockedByTeacher = await isBlocked(teacherId, studentId);
+    if (isBlockedByTeacher) {
+      return res.status(403).json({ error: 'Unable to send request to this teacher' });
+    }
+    
+    // Check existing request
+    const existingRequest = await LinkRequest.findOne({
+      requesterId: studentId,
+      targetId: teacherId
+    });
+    
+    if (existingRequest) {
+      if (existingRequest.status === 'PENDING') {
+        return res.status(400).json({ error: 'Request already pending' });
+      }
+      if (existingRequest.status === 'BLOCKED') {
+        return res.status(403).json({ error: 'You are blocked from sending requests to this teacher' });
+      }
+      // If rejected, allow resending
+      if (existingRequest.status === 'REJECTED') {
+        existingRequest.status = 'PENDING';
+        existingRequest.createdAt = new Date();
+        existingRequest.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+        existingRequest.inviteCode = inviteCode;
+        existingRequest.requestMethod = 'INVITE_LINK';
+        await existingRequest.save();
+      }
+    }
+    
+    const student = await User.findById(studentId).select('name avatar studentCode');
+    const teacher = await User.findById(teacherId).select('name fcmToken');
+    
+    // If auto-approve is ON, directly link
+    if (inviteLink.autoApprove) {
+      // Reactivate or create link
+      if (existingLink) {
+        existingLink.isActive = true;
+        existingLink.linkedAt = new Date();
+        existingLink.isBlocked = false;
+        await existingLink.save();
+      } else {
+        await TeacherStudentLink.create({
+          teacherId,
+          studentId,
+          isActive: true
+        });
+      }
+      
+      inviteLink.totalJoins += 1;
+      await inviteLink.save();
+      
+      // Create notification for teacher
+      await createNotification(
+        teacherId,
+        'SYSTEM',
+        'New Student Joined',
+        `${student?.name || 'A student'} joined via your invite link`,
+        { studentId: studentId.toString(), type: 'student_joined' }
+      );
+      
+      console.log(`✅ Student ${studentId} auto-joined teacher ${teacherId} via invite link`);
+      
+      return res.json({
+        success: true,
+        autoApproved: true,
+        message: 'Successfully linked with teacher!',
+        teacher: { id: teacherId.toString(), name: teacher?.name }
+      });
+    }
+    
+    // Manual approval required - create request
+    if (!existingRequest || existingRequest.status === 'REJECTED') {
+      await LinkRequest.create({
+        requesterId: studentId,
+        requesterRole: 'STUDENT',
+        targetId: teacherId,
+        targetRole: 'TEACHER',
+        inviteCode,
+        requestMethod: 'INVITE_LINK',
+        status: 'PENDING'
+      });
+    }
+    
+    // Create notification for teacher
+    await createNotification(
+      teacherId,
+      'SYSTEM',
+      'New Link Request',
+      `${student?.name || 'A student'} wants to connect with you`,
+      { 
+        requesterId: studentId.toString(), 
+        requesterName: student?.name,
+        type: 'link_request' 
+      }
+    );
+    
+    // Send real-time notification via socket
+    io.to(teacherId.toString()).emit('new_link_request', {
+      requesterId: studentId.toString(),
+      requesterName: student?.name,
+      requesterAvatar: student?.avatar,
+      studentCode: student?.studentCode
+    });
+    
+    console.log(`📨 Link request sent from student ${studentId} to teacher ${teacherId}`);
+    
+    res.json({
+      success: true,
+      autoApproved: false,
+      message: 'Request sent! Waiting for teacher approval.',
+      teacher: { id: teacherId.toString(), name: teacher?.name }
+    });
+  } catch (error) {
+    console.error('Join via invite error:', error);
+    res.status(500).json({ error: 'Failed to process join request' });
+  }
+});
+
+// ========= LINK REQUEST MANAGEMENT APIs =========
+
+// Get pending requests (for both teachers and students)
+app.get('/api/requests/pending', authRequired, async (req, res) => {
+  try {
+    const requests = await LinkRequest.find({
+      targetId: req.userId,
+      status: 'PENDING'
+    })
+    .populate('requesterId', 'name avatar studentCode role')
+    .sort({ createdAt: -1 })
+    .lean();
+    
+    const formatted = requests.map(r => ({
+      id: r._id.toString(),
+      requester: r.requesterId ? {
+        id: r.requesterId._id.toString(),
+        name: r.requesterId.name,
+        avatar: r.requesterId.avatar,
+        studentCode: r.requesterId.studentCode,
+        role: r.requesterId.role
+      } : null,
+      requestMethod: r.requestMethod,
+      createdAt: r.createdAt,
+      expiresAt: r.expiresAt
+    }));
+    
+    res.json({
+      success: true,
+      requests: formatted,
+      count: formatted.length
+    });
+  } catch (error) {
+    console.error('Get pending requests error:', error);
+    res.status(500).json({ error: 'Failed to fetch requests' });
+  }
+});
+
+// Get all requests with filters
+app.get('/api/requests', authRequired, async (req, res) => {
+  try {
+    const { status, type } = req.query;
+    
+    const query = {};
+    
+    if (type === 'received') {
+      query.targetId = req.userId;
+    } else if (type === 'sent') {
+      query.requesterId = req.userId;
+    } else {
+      // Default: show received requests
+      query.targetId = req.userId;
+    }
+    
+    if (status && ['PENDING', 'APPROVED', 'REJECTED', 'BLOCKED'].includes(status)) {
+      query.status = status;
+    }
+    
+    const requests = await LinkRequest.find(query)
+      .populate('requesterId', 'name avatar studentCode role')
+      .populate('targetId', 'name avatar role')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+    
+    const formatted = requests.map(r => ({
+      id: r._id.toString(),
+      requester: r.requesterId ? {
+        id: r.requesterId._id.toString(),
+        name: r.requesterId.name,
+        avatar: r.requesterId.avatar,
+        studentCode: r.requesterId.studentCode,
+        role: r.requesterId.role
+      } : null,
+      target: r.targetId ? {
+        id: r.targetId._id.toString(),
+        name: r.targetId.name,
+        avatar: r.targetId.avatar,
+        role: r.targetId.role
+      } : null,
+      status: r.status,
+      requestMethod: r.requestMethod,
+      createdAt: r.createdAt,
+      respondedAt: r.respondedAt
+    }));
+    
+    res.json({
+      success: true,
+      requests: formatted,
+      count: formatted.length
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch requests' });
+  }
+});
+
+// Get request counts (for badge)
+app.get('/api/requests/count', authRequired, async (req, res) => {
+  try {
+    const pendingCount = await LinkRequest.countDocuments({
+      targetId: req.userId,
+      status: 'PENDING'
+    });
+    
+    res.json({
+      success: true,
+      pendingCount
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get count' });
+  }
+});
+
+// Approve request
+app.post('/api/requests/:requestId/approve', authRequired, async (req, res) => {
+  try {
+    const request = await LinkRequest.findOne({
+      _id: req.params.requestId,
+      targetId: req.userId,
+      status: 'PENDING'
+    }).populate('requesterId', 'name fcmToken');
+    
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found or already processed' });
+    }
+    
+    // Determine teacher and student based on roles
+    let teacherId, studentId;
+    if (req.role === 'TEACHER') {
+      teacherId = req.userId;
+      studentId = request.requesterId._id;
+    } else {
+      teacherId = request.requesterId._id;
+      studentId = req.userId;
+    }
+    
+    // Create or reactivate link
+    const existingLink = await TeacherStudentLink.findOne({ teacherId, studentId });
+    
+    if (existingLink) {
+      existingLink.isActive = true;
+      existingLink.linkedAt = new Date();
+      existingLink.isBlocked = false;
+      await existingLink.save();
+    } else {
+      await TeacherStudentLink.create({
+        teacherId,
+        studentId,
+        isActive: true
+      });
+    }
+    
+    // Update request status
+    request.status = 'APPROVED';
+    request.respondedAt = new Date();
+    await request.save();
+    
+    // Update invite link stats if applicable
+    if (request.inviteCode) {
+      await TeacherInviteLink.findOneAndUpdate(
+        { inviteCode: request.inviteCode },
+        { $inc: { totalJoins: 1 } }
+      );
+    }
+    
+    // Notify requester
+    const approver = await User.findById(req.userId).select('name');
+    await createNotification(
+      request.requesterId._id,
+      'SYSTEM',
+      'Request Approved! 🎉',
+      `${approver?.name || 'User'} approved your link request`,
+      { approverId: req.userId, type: 'request_approved' }
+    );
+    
+    // Real-time notification
+    io.to(request.requesterId._id.toString()).emit('request_approved', {
+      requestId: request._id.toString(),
+      approverName: approver?.name
+    });
+    
+    console.log(`✅ Request ${req.params.requestId} approved by ${req.userId}`);
+    
+    res.json({
+      success: true,
+      message: 'Request approved successfully',
+      linkedUser: {
+        id: request.requesterId._id.toString(),
+        name: request.requesterId.name
+      }
+    });
+  } catch (error) {
+    console.error('Approve request error:', error);
+    res.status(500).json({ error: 'Failed to approve request' });
+  }
+});
+
+// Reject request
+app.post('/api/requests/:requestId/reject', authRequired, async (req, res) => {
+  try {
+    const { note } = req.body;
+    
+    const request = await LinkRequest.findOne({
+      _id: req.params.requestId,
+      targetId: req.userId,
+      status: 'PENDING'
+    }).populate('requesterId', 'name');
+    
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found or already processed' });
+    }
+    
+    request.status = 'REJECTED';
+    request.respondedAt = new Date();
+    request.responseNote = note || '';
+    await request.save();
+    
+    // Notify requester
+    const rejecter = await User.findById(req.userId).select('name');
+    await createNotification(
+      request.requesterId._id,
+      'SYSTEM',
+      'Request Declined',
+      `${rejecter?.name || 'User'} declined your link request`,
+      { rejecterId: req.userId, type: 'request_rejected' }
+    );
+    
+    io.to(request.requesterId._id.toString()).emit('request_rejected', {
+      requestId: request._id.toString()
+    });
+    
+    console.log(`❌ Request ${req.params.requestId} rejected by ${req.userId}`);
+    
+    res.json({
+      success: true,
+      message: 'Request rejected'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to reject request' });
+  }
+});
+
+// Block requester (reject + block future requests)
+app.post('/api/requests/:requestId/block', authRequired, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    
+    const request = await LinkRequest.findOne({
+      _id: req.params.requestId,
+      targetId: req.userId
+    }).populate('requesterId', 'name');
+    
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    
+    // Update request status
+    request.status = 'BLOCKED';
+    request.respondedAt = new Date();
+    request.responseNote = reason || 'Blocked by user';
+    await request.save();
+    
+    // Add to block list
+    await UserBlock.findOneAndUpdate(
+      { blockerId: req.userId, blockedId: request.requesterId._id },
+      { blockerId: req.userId, blockedId: request.requesterId._id },
+      { upsert: true }
+    );
+    
+    // If there's an existing link, deactivate and mark blocked
+    await TeacherStudentLink.findOneAndUpdate(
+      { 
+        $or: [
+          { teacherId: req.userId, studentId: request.requesterId._id },
+          { teacherId: request.requesterId._id, studentId: req.userId }
+        ]
+      },
+      { isActive: false, isBlocked: true, blockedAt: new Date(), blockedBy: req.role.toLowerCase() }
+    );
+    
+    console.log(`🚫 Request ${req.params.requestId} blocked by ${req.userId}`);
+    
+    res.json({
+      success: true,
+      message: 'User blocked. They cannot send you requests anymore.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to block user' });
+  }
+});
+
+// Send request directly (teacher adding student via code OR student adding teacher)
+app.post('/api/requests/send', authRequired, async (req, res) => {
+  try {
+    const { targetId, studentCode } = req.body;
+    
+    let targetUser;
+    
+    // Find target user
+    if (studentCode) {
+      targetUser = await User.findOne({ studentCode: studentCode.toUpperCase() });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'Invalid student code' });
+      }
+    } else if (targetId) {
+      targetUser = await User.findById(targetId);
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+    } else {
+      return res.status(400).json({ error: 'Target ID or student code required' });
+    }
+    
+    // Check if already linked
+    let teacherId, studentId;
+    if (req.role === 'TEACHER') {
+      teacherId = req.userId;
+      studentId = targetUser._id;
+    } else {
+      teacherId = targetUser._id;
+      studentId = req.userId;
+    }
+    
+    const existingLink = await TeacherStudentLink.findOne({
+      teacherId,
+      studentId,
+      isActive: true
+    });
+    
+    if (existingLink) {
+      return res.status(400).json({ error: 'Already linked with this user' });
+    }
+    
+    // Check if blocked
+    const blocked = await isBlocked(targetUser._id, req.userId);
+    if (blocked) {
+      return res.status(403).json({ error: 'Unable to send request to this user' });
+    }
+    
+    // Check existing request
+    const existingRequest = await LinkRequest.findOne({
+      requesterId: req.userId,
+      targetId: targetUser._id,
+      status: { $in: ['PENDING', 'BLOCKED'] }
+    });
+    
+    if (existingRequest) {
+      if (existingRequest.status === 'PENDING') {
+        return res.status(400).json({ error: 'Request already pending' });
+      }
+      if (existingRequest.status === 'BLOCKED') {
+        return res.status(403).json({ error: 'You are blocked from sending requests to this user' });
+      }
+    }
+    
+    // Check if target has auto-approve enabled (for teachers)
+    let autoApproved = false;
+    if (targetUser.role === 'TEACHER') {
+      const inviteSettings = await TeacherInviteLink.findOne({ 
+        teacherId: targetUser._id,
+        autoApprove: true 
+      });
+      
+      if (inviteSettings) {
+        // Auto-approve
+        const link = await TeacherStudentLink.findOne({ teacherId, studentId });
+        if (link) {
+          link.isActive = true;
+          link.linkedAt = new Date();
+          await link.save();
+        } else {
+          await TeacherStudentLink.create({ teacherId, studentId, isActive: true });
+        }
+        autoApproved = true;
+      }
+    }
+    
+    if (!autoApproved) {
+      // Create request
+      await LinkRequest.findOneAndUpdate(
+        { requesterId: req.userId, targetId: targetUser._id },
+        {
+          requesterId: req.userId,
+          requesterRole: req.role,
+          targetId: targetUser._id,
+          targetRole: targetUser.role,
+          studentCode: studentCode?.toUpperCase(),
+          requestMethod: studentCode ? 'STUDENT_CODE' : 'DIRECT',
+          status: 'PENDING',
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+        },
+        { upsert: true, new: true }
+      );
+    }
+    
+    // Get requester info for notification
+    const requester = await User.findById(req.userId).select('name');
+    
+    // Send notification
+    await createNotification(
+      targetUser._id,
+      'SYSTEM',
+      autoApproved ? 'New Connection' : 'New Link Request',
+      autoApproved 
+        ? `${requester?.name || 'Someone'} connected with you`
+        : `${requester?.name || 'Someone'} wants to connect with you`,
+      { 
+        requesterId: req.userId, 
+        requesterName: requester?.name,
+        type: autoApproved ? 'auto_linked' : 'link_request' 
+      }
+    );
+    
+    // Real-time notification
+    io.to(targetUser._id.toString()).emit(autoApproved ? 'new_link' : 'new_link_request', {
+      requesterId: req.userId,
+      requesterName: requester?.name,
+      autoApproved
+    });
+    
+    res.json({
+      success: true,
+      autoApproved,
+      message: autoApproved 
+        ? 'Successfully linked!'
+        : 'Request sent! Waiting for approval.',
+      target: {
+        id: targetUser._id.toString(),
+        name: targetUser.name,
+        role: targetUser.role
+      }
+    });
+  } catch (error) {
+    console.error('Send request error:', error);
+    res.status(500).json({ error: 'Failed to send request' });
+  }
+});
+
+// Cancel sent request
+app.delete('/api/requests/:requestId', authRequired, async (req, res) => {
+  try {
+    const request = await LinkRequest.findOneAndDelete({
+      _id: req.params.requestId,
+      requesterId: req.userId,
+      status: 'PENDING'
+    });
+    
+    if (!request) {
+      return res.status(404).json({ error: 'Request not found or cannot be cancelled' });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Request cancelled'
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to cancel request' });
   }
 });
 
