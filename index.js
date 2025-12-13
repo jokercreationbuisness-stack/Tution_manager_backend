@@ -1415,30 +1415,6 @@ const getInviteLink = (inviteCode) => {
 
 
 // Generate backup codes for 2FA
-const generateBackupCodes = () => {
-  const codes = [];
-  for (let i = 0; i < 10; i++) {
-    codes.push({
-      code: crypto.randomBytes(4).toString('hex').toUpperCase(),
-      used: false
-    });
-  }
-  return codes;
-};
-
-// Verify Google Token
-const verifyGoogleToken = async (idToken) => {
-  try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: GOOGLE_CLIENT_ID
-    });
-    return ticket.getPayload();
-  } catch (error) {
-    console.error('Google token verification error:', error);
-    return null;
-  }
-};
 
 // ========= WEBRTC HELPER FUNCTION =========
 async function checkCallAuthorization(callerId, receiverId) {
