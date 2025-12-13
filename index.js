@@ -16,6 +16,36 @@ const fs = require('fs');
 // Add this after your existing requires
 const crypto = require('crypto');
 
+// ========= ADD AFTER LINE 18 =========
+// Google OAuth & OTP Dependencies
+const { OAuth2Client } = require('google-auth-library');
+const speakeasy = require('speakeasy');
+const QRCode = require('qrcode');
+const nodemailer = require('nodemailer');
+const twilio = require('twilio');
+
+// Google OAuth Configuration
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || 'YOUR_GOOGLE_CLIENT_SECRET';
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// Twilio Configuration for SMS OTP
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER;
+const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN 
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN) 
+  : null;
+
+// Email Configuration (Gmail SMTP or any SMTP)
+const emailTransporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_APP_PASSWORD // Use App Password for Gmail
+  }
+});
+
 // Jitsi JWT Configuration - Add these environment variables or use defaults
 const JITSI_APP_ID = process.env.JITSI_APP_ID || 'tuition_manager_app';
 const JITSI_APP_SECRET = process.env.JITSI_APP_SECRET || 'your_jitsi_app_secret_key_2024';
@@ -136,6 +166,12 @@ const UserSchema = new Schema({
     default: 'free' 
   },
   subscriptionExpiry: { type: Date },
+  // Add to UserSchema (after subscriptionExpiry field):
+  googleId: { type: String, unique: true, sparse: true },
+  isGoogleUser: { type: Boolean, default: false },
+  isEmailVerified: { type: Boolean, default: false },
+  isMobileVerified: { type: Boolean, default: false },
+  twoFactorEnabled: { type: Boolean, default: false },
   totalGameXP: { type: Number, default: 0 },
   gamesPlayed: { type: Number, default: 0 }
 });
@@ -371,6 +407,58 @@ const UserBlockSchema = new Schema({
   createdAt: { type: Date, default: Date.now }
 });
 UserBlockSchema.index({ blockerId: 1, blockedId: 1 }, { unique: true });
+
+// ========= OTP SCHEMA =========
+const OTPSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User' },
+  email: { type: String },
+  mobile: { type: String },
+  otp: { type: String, required: true },
+  type: { type: String, enum: ['EMAIL', 'SMS', 'BOTH'], required: true },
+  purpose: { type: String, enum: ['SIGNUP', 'LOGIN', 'RESET_PASSWORD', '2FA_SETUP'], required: true },
+  verified: { type: Boolean, default: false },
+  attempts: { type: Number, default: 0 },
+  expiresAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+OTPSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 }); // Auto-delete expired
+OTPSchema.index({ email: 1, purpose: 1 });
+OTPSchema.index({ mobile: 1, purpose: 1 });
+
+// ========= GOOGLE AUTH PENDING USER SCHEMA =========
+const GooglePendingUserSchema = new Schema({
+  googleId: { type: String, required: true, unique: true },
+  email: { type: String, required: true },
+  name: { type: String, required: true },
+  avatar: { type: String },
+  pendingToken: { type: String, required: true, unique: true },
+  expiresAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+GooglePendingUserSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
+// ========= TWO FACTOR AUTH SCHEMA =========
+const TwoFactorAuthSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true, unique: true },
+  secret: { type: String, required: true },
+  isEnabled: { type: Boolean, default: false },
+  backupCodes: [{
+    code: { type: String },
+    used: { type: Boolean, default: false }
+  }],
+  enabledAt: { type: Date },
+  createdAt: { type: Date, default: Date.now }
+});
+
+// ========= PASSWORD RESET TOKEN SCHEMA =========
+const PasswordResetSchema = new Schema({
+  userId: { type: Types.ObjectId, ref: 'User', required: true },
+  token: { type: String, required: true, unique: true },
+  otpVerified: { type: Boolean, default: false },
+  expiresAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now }
+});
+PasswordResetSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 // ========= TEACHER INVITE LINK SCHEMA =========
 // Location: Add after UserBlockSchema definition (around line 390)
@@ -987,6 +1075,12 @@ const SecurityEvent = mongoose.model('SecurityEvent', SecurityEventSchema);
 const TeacherInviteLink = mongoose.model('TeacherInviteLink', TeacherInviteLinkSchema);
 const LinkRequest = mongoose.model('LinkRequest', LinkRequestSchema);
 
+// ========= NEW AUTH MODELS =========
+const OTP = mongoose.model('OTP', OTPSchema);
+const GooglePendingUser = mongoose.model('GooglePendingUser', GooglePendingUserSchema);
+const TwoFactorAuth = mongoose.model('TwoFactorAuth', TwoFactorAuthSchema);
+const PasswordReset = mongoose.model('PasswordReset', PasswordResetSchema);
+
 // ========= HELPER FUNCTIONS =========
 const generateStudentCode = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -1227,6 +1321,107 @@ const generateInviteCode = () => {
 const getInviteLink = (inviteCode) => {
   const baseUrl = process.env.APP_BASE_URL || 'https://tuitionmanager.app';
   return `${baseUrl}/join/${inviteCode}`;
+};
+
+// ========= OTP HELPER FUNCTIONS =========
+
+// Generate 6-digit OTP
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Send Email OTP
+const sendEmailOTP = async (email, otp, purpose) => {
+  const subjects = {
+    'SIGNUP': 'Verify Your Email - TuitionManager',
+    'LOGIN': 'Login Verification - TuitionManager',
+    'RESET_PASSWORD': 'Reset Your Password - TuitionManager',
+    '2FA_SETUP': 'Two-Factor Authentication Setup - TuitionManager'
+  };
+  
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: subjects[purpose] || 'OTP Verification - TuitionManager',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; border-radius: 10px 10px 0 0;">
+          <h1 style="color: white; margin: 0; text-align: center;">🎓 TuitionManager</h1>
+        </div>
+        <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+          <h2 style="color: #333;">Your Verification Code</h2>
+          <p style="color: #666; font-size: 16px;">Use the following OTP to ${purpose === 'RESET_PASSWORD' ? 'reset your password' : 'verify your account'}:</p>
+          <div style="background: #667eea; color: white; font-size: 32px; font-weight: bold; padding: 20px; text-align: center; border-radius: 8px; letter-spacing: 8px; margin: 20px 0;">
+            ${otp}
+          </div>
+          <p style="color: #999; font-size: 14px;">This code expires in 10 minutes. Do not share this code with anyone.</p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+          <p style="color: #999; font-size: 12px; text-align: center;">If you didn't request this, please ignore this email.</p>
+        </div>
+      </div>
+    `
+  };
+  
+  try {
+    await emailTransporter.sendMail(mailOptions);
+    return { success: true };
+  } catch (error) {
+    console.error('Email OTP error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// Send SMS OTP via Twilio
+const sendSmsOTP = async (mobile, otp, purpose) => {
+  if (!twilioClient) {
+    console.error('Twilio not configured');
+    return { success: false, error: 'SMS service not configured' };
+  }
+  
+  const messages = {
+    'SIGNUP': `Your TuitionManager verification code is: ${otp}. Valid for 10 minutes.`,
+    'LOGIN': `Your TuitionManager login code is: ${otp}. Valid for 10 minutes.`,
+    'RESET_PASSWORD': `Your password reset code is: ${otp}. Valid for 10 minutes.`,
+    '2FA_SETUP': `Your 2FA setup code is: ${otp}. Valid for 10 minutes.`
+  };
+  
+  try {
+    await twilioClient.messages.create({
+      body: messages[purpose] || `Your OTP is: ${otp}`,
+      from: TWILIO_PHONE_NUMBER,
+      to: mobile
+    });
+    return { success: true };
+  } catch (error) {
+    console.error('SMS OTP error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// Generate backup codes for 2FA
+const generateBackupCodes = () => {
+  const codes = [];
+  for (let i = 0; i < 10; i++) {
+    codes.push({
+      code: crypto.randomBytes(4).toString('hex').toUpperCase(),
+      used: false
+    });
+  }
+  return codes;
+};
+
+// Verify Google Token
+const verifyGoogleToken = async (idToken) => {
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: GOOGLE_CLIENT_ID
+    });
+    return ticket.getPayload();
+  } catch (error) {
+    console.error('Google token verification error:', error);
+    return null;
+  }
 };
 
 // ========= WEBRTC HELPER FUNCTION =========
@@ -12518,6 +12713,986 @@ app.get('/api/jitsi/rooms/:roomId/config', authRequired, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get room config' });
+  }
+});
+
+// ========================================
+// ========= ENHANCED AUTH APIs =========
+// ========================================
+
+// ========= GOOGLE OAUTH =========
+
+// Google Sign-In - Initial verification
+app.post('/api/auth/google', async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    
+    if (!idToken) {
+      return res.status(400).json({ error: 'ID token required' });
+    }
+    
+    const payload = await verifyGoogleToken(idToken);
+    if (!payload) {
+      return res.status(401).json({ error: 'Invalid Google token' });
+    }
+    
+    const { sub: googleId, email, name, picture } = payload;
+    
+    // Check if user already exists with this Google ID
+    let user = await User.findOne({ googleId });
+    
+    if (user) {
+      // Existing Google user - check 2FA
+      const twoFA = await TwoFactorAuth.findOne({ userId: user._id, isEnabled: true });
+      
+      if (twoFA) {
+        // Return pending 2FA
+        const tempToken = jwt.sign({ userId: user._id, pending2FA: true }, JWT_SECRET, { expiresIn: '10m' });
+        return res.json({
+          success: true,
+          requires2FA: true,
+          tempToken,
+          user: { name: user.name }
+        });
+      }
+      
+      // Generate JWT and return
+      const token = jwt.sign(
+        { userId: user._id, role: user.role, name: user.name },
+        JWT_SECRET,
+        { expiresIn: '30d' }
+      );
+      
+      user.lastLogin = new Date();
+      user.isOnline = true;
+      await user.save();
+      
+      return res.json({
+        success: true,
+        isNewUser: false,
+        token,
+        user: {
+          id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          mobile: user.mobile,
+          studentCode: user.studentCode,
+          avatar: user.avatar || picture
+        }
+      });
+    }
+    
+    // Check if email exists with password-based account
+    const existingEmailUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingEmailUser && !existingEmailUser.googleId) {
+      return res.status(409).json({ 
+        error: 'An account with this email already exists. Please login with your password.',
+        existingAccount: true
+      });
+    }
+    
+    // New Google user - create pending registration
+    const pendingToken = crypto.randomBytes(32).toString('hex');
+    
+    await GooglePendingUser.findOneAndUpdate(
+      { googleId },
+      {
+        googleId,
+        email,
+        name,
+        avatar: picture,
+        pendingToken,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30 minutes
+      },
+      { upsert: true, new: true }
+    );
+    
+    res.json({
+      success: true,
+      isNewUser: true,
+      pendingToken,
+      googleUser: { email, name, avatar: picture }
+    });
+    
+  } catch (error) {
+    console.error('Google auth error:', error);
+    res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// Complete Google registration (after collecting role + mobile)
+app.post('/api/auth/google/complete', async (req, res) => {
+  try {
+    const { pendingToken, role, mobile } = req.body;
+    
+    if (!pendingToken || !role || !mobile) {
+      return res.status(400).json({ error: 'Pending token, role, and mobile are required' });
+    }
+    
+    if (!['STUDENT', 'TEACHER'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+    
+    // Find pending Google user
+    const pending = await GooglePendingUser.findOne({ pendingToken });
+    if (!pending) {
+      return res.status(400).json({ error: 'Invalid or expired registration. Please try again.' });
+    }
+    
+    // Send SMS OTP for mobile verification
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    
+    // Save OTP
+    await OTP.findOneAndUpdate(
+      { mobile, purpose: 'SIGNUP' },
+      {
+        mobile,
+        otp: await bcrypt.hash(otp, 10),
+        type: 'SMS',
+        purpose: 'SIGNUP',
+        verified: false,
+        attempts: 0,
+        expiresAt: otpExpiry
+      },
+      { upsert: true, new: true }
+    );
+    
+    // Send SMS
+    const smsResult = await sendSmsOTP(mobile, otp, 'SIGNUP');
+    if (!smsResult.success) {
+      return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
+    }
+    
+    res.json({
+      success: true,
+      message: 'OTP sent to your mobile number',
+      requiresOTP: true,
+      pendingToken // Return same token for verification step
+    });
+    
+  } catch (error) {
+    console.error('Google complete error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// Verify OTP and finalize Google registration
+app.post('/api/auth/google/verify-otp', async (req, res) => {
+  try {
+    const { pendingToken, mobile, otp, role } = req.body;
+    
+    if (!pendingToken || !mobile || !otp || !role) {
+      return res.status(400).json({ error: 'All fields are required' });
+    }
+    
+    // Find pending Google user
+    const pending = await GooglePendingUser.findOne({ pendingToken });
+    if (!pending) {
+      return res.status(400).json({ error: 'Invalid or expired registration' });
+    }
+    
+    // Verify OTP
+    const otpRecord = await OTP.findOne({ mobile, purpose: 'SIGNUP' });
+    if (!otpRecord) {
+      return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+    }
+    
+    if (otpRecord.attempts >= 5) {
+      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
+    }
+    
+    const isValidOTP = await bcrypt.compare(otp, otpRecord.otp);
+    if (!isValidOTP) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return res.status(400).json({ error: 'Invalid OTP' });
+    }
+    
+    // Create user
+    let studentCode = null;
+    if (role === 'STUDENT') {
+      do {
+        studentCode = generateStudentCode();
+      } while (await User.exists({ studentCode }));
+    }
+    
+    const user = await User.create({
+      name: pending.name,
+      email: pending.email.toLowerCase(),
+      mobile,
+      passwordHash: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10), // Random password for Google users
+      role,
+      studentCode,
+      avatar: pending.avatar,
+      googleId: pending.googleId,
+      isGoogleUser: true,
+      isEmailVerified: true, // Google email is verified
+      isMobileVerified: true
+    });
+    
+    // Cleanup
+    await GooglePendingUser.deleteOne({ pendingToken });
+    await OTP.deleteOne({ mobile, purpose: 'SIGNUP' });
+    
+    // Generate JWT
+    const token = jwt.sign(
+      { userId: user._id, role: user.role, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    
+    console.log(`✅ New Google user registered: ${user.email} as ${role}`);
+    
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mobile: user.mobile,
+        studentCode: user.studentCode,
+        avatar: user.avatar
+      }
+    });
+    
+  } catch (error) {
+    console.error('Google verify OTP error:', error);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// ========= MANUAL SIGNUP WITH OTP =========
+
+// Send OTP for manual signup (Email + SMS for teachers, just email for students)
+app.post('/api/auth/signup/send-otp', async (req, res) => {
+  try {
+    const { email, mobile, role } = req.body;
+    
+    if (!email || !role) {
+      return res.status(400).json({ error: 'Email and role are required' });
+    }
+    
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+    
+    const emailOtp = generateOTP();
+    const smsOtp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    
+    // Send Email OTP
+    const emailResult = await sendEmailOTP(email, emailOtp, 'SIGNUP');
+    if (!emailResult.success) {
+      return res.status(500).json({ error: 'Failed to send email OTP' });
+    }
+    
+    // Save Email OTP
+    await OTP.findOneAndUpdate(
+      { email: email.toLowerCase(), purpose: 'SIGNUP', type: 'EMAIL' },
+      {
+        email: email.toLowerCase(),
+        otp: await bcrypt.hash(emailOtp, 10),
+        type: 'EMAIL',
+        purpose: 'SIGNUP',
+        verified: false,
+        attempts: 0,
+        expiresAt: otpExpiry
+      },
+      { upsert: true }
+    );
+    
+    // For teachers, also send SMS OTP
+    if (role === 'TEACHER' && mobile) {
+      const smsResult = await sendSmsOTP(mobile, smsOtp, 'SIGNUP');
+      if (smsResult.success) {
+        await OTP.findOneAndUpdate(
+          { mobile, purpose: 'SIGNUP', type: 'SMS' },
+          {
+            mobile,
+            otp: await bcrypt.hash(smsOtp, 10),
+            type: 'SMS',
+            purpose: 'SIGNUP',
+            verified: false,
+            attempts: 0,
+            expiresAt: otpExpiry
+          },
+          { upsert: true }
+        );
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: role === 'TEACHER' && mobile 
+        ? 'OTP sent to email and mobile' 
+        : 'OTP sent to email',
+      requiresEmailOTP: true,
+      requiresSmsOTP: role === 'TEACHER' && !!mobile
+    });
+    
+  } catch (error) {
+    console.error('Send OTP error:', error);
+    res.status(500).json({ error: 'Failed to send OTP' });
+  }
+});
+
+// Verify OTP and complete signup
+app.post('/api/auth/signup/verify', async (req, res) => {
+  try {
+    const { name, email, mobile, password, role, emailOtp, smsOtp } = req.body;
+    
+    if (!name || !email || !password || !role || !emailOtp) {
+      return res.status(400).json({ error: 'All required fields must be provided' });
+    }
+    
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    
+    // Verify Email OTP
+    const emailOtpRecord = await OTP.findOne({ 
+      email: email.toLowerCase(), 
+      purpose: 'SIGNUP', 
+      type: 'EMAIL' 
+    });
+    
+    if (!emailOtpRecord) {
+      return res.status(400).json({ error: 'Email OTP expired. Please request a new one.' });
+    }
+    
+    if (emailOtpRecord.attempts >= 5) {
+      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
+    }
+    
+    const isValidEmailOtp = await bcrypt.compare(emailOtp, emailOtpRecord.otp);
+    if (!isValidEmailOtp) {
+      emailOtpRecord.attempts += 1;
+      await emailOtpRecord.save();
+      return res.status(400).json({ error: 'Invalid email OTP' });
+    }
+    
+    // For teachers, also verify SMS OTP
+    if (role === 'TEACHER' && mobile) {
+      if (!smsOtp) {
+        return res.status(400).json({ error: 'SMS OTP required for teachers' });
+      }
+      
+      const smsOtpRecord = await OTP.findOne({ 
+        mobile, 
+        purpose: 'SIGNUP', 
+        type: 'SMS' 
+      });
+      
+      if (!smsOtpRecord) {
+        return res.status(400).json({ error: 'SMS OTP expired. Please request a new one.' });
+      }
+      
+      const isValidSmsOtp = await bcrypt.compare(smsOtp, smsOtpRecord.otp);
+      if (!isValidSmsOtp) {
+        smsOtpRecord.attempts += 1;
+        await smsOtpRecord.save();
+        return res.status(400).json({ error: 'Invalid SMS OTP' });
+      }
+    }
+    
+    // Create user
+    let studentCode = null;
+    if (role === 'STUDENT') {
+      do {
+        studentCode = generateStudentCode();
+      } while (await User.exists({ studentCode }));
+    }
+    
+    const passwordHash = await bcrypt.hash(password, 10);
+    
+    const user = await User.create({
+      name,
+      email: email.toLowerCase(),
+      mobile,
+      passwordHash,
+      role,
+      studentCode,
+      isEmailVerified: true,
+      isMobileVerified: role === 'TEACHER' && !!mobile
+    });
+    
+    // Cleanup OTPs
+    await OTP.deleteMany({ email: email.toLowerCase(), purpose: 'SIGNUP' });
+    if (mobile) {
+      await OTP.deleteMany({ mobile, purpose: 'SIGNUP' });
+    }
+    
+    // Generate JWT
+    const token = jwt.sign(
+      { userId: user._id, role: user.role, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    
+    console.log(`✅ New user registered: ${email} as ${role}`);
+    
+    res.status(201).json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mobile: user.mobile,
+        studentCode: user.studentCode
+      }
+    });
+    
+  } catch (error) {
+    console.error('Signup verify error:', error);
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'Email already registered' });
+    }
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+// ========= RESEND OTP =========
+app.post('/api/auth/resend-otp', async (req, res) => {
+  try {
+    const { email, mobile, type, purpose } = req.body;
+    
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    
+    if (type === 'EMAIL' && email) {
+      const emailResult = await sendEmailOTP(email, otp, purpose);
+      if (!emailResult.success) {
+        return res.status(500).json({ error: 'Failed to send email OTP' });
+      }
+      
+      await OTP.findOneAndUpdate(
+        { email: email.toLowerCase(), purpose, type: 'EMAIL' },
+        {
+          otp: await bcrypt.hash(otp, 10),
+          attempts: 0,
+          expiresAt: otpExpiry
+        },
+        { upsert: true }
+      );
+    } else if (type === 'SMS' && mobile) {
+      const smsResult = await sendSmsOTP(mobile, otp, purpose);
+      if (!smsResult.success) {
+        return res.status(500).json({ error: 'Failed to send SMS OTP' });
+      }
+      
+      await OTP.findOneAndUpdate(
+        { mobile, purpose, type: 'SMS' },
+        {
+          otp: await bcrypt.hash(otp, 10),
+          attempts: 0,
+          expiresAt: otpExpiry
+        },
+        { upsert: true }
+      );
+    } else {
+      return res.status(400).json({ error: 'Invalid request' });
+    }
+    
+    res.json({ success: true, message: 'OTP resent successfully' });
+    
+  } catch (error) {
+    console.error('Resend OTP error:', error);
+    res.status(500).json({ error: 'Failed to resend OTP' });
+  }
+});
+
+// ========= TWO-FACTOR AUTHENTICATION =========
+
+// Setup 2FA - Generate secret
+app.post('/api/auth/2fa/setup', authRequired, async (req, res) => {
+  try {
+    // Check if already enabled
+    const existing = await TwoFactorAuth.findOne({ userId: req.userId });
+    if (existing && existing.isEnabled) {
+      return res.status(400).json({ error: '2FA is already enabled' });
+    }
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Generate secret
+    const secret = speakeasy.generateSecret({
+      name: `TuitionManager (${user.email})`,
+      issuer: 'TuitionManager'
+    });
+    
+    // Generate QR code
+    const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
+    
+    // Save secret (not enabled yet)
+    await TwoFactorAuth.findOneAndUpdate(
+      { userId: req.userId },
+      {
+        userId: req.userId,
+        secret: secret.base32,
+        isEnabled: false,
+        backupCodes: generateBackupCodes()
+      },
+      { upsert: true, new: true }
+    );
+    
+    res.json({
+      success: true,
+      secret: secret.base32,
+      qrCode: qrCodeUrl,
+      message: 'Scan the QR code with Google Authenticator, then verify with a code'
+    });
+    
+  } catch (error) {
+    console.error('2FA setup error:', error);
+    res.status(500).json({ error: 'Failed to setup 2FA' });
+  }
+});
+
+// Verify and enable 2FA
+app.post('/api/auth/2fa/verify', authRequired, async (req, res) => {
+  try {
+    const { code } = req.body;
+    
+    if (!code) {
+      return res.status(400).json({ error: 'Verification code required' });
+    }
+    
+    const twoFA = await TwoFactorAuth.findOne({ userId: req.userId });
+    if (!twoFA) {
+      return res.status(400).json({ error: 'Please setup 2FA first' });
+    }
+    
+    // Verify the code
+    const isValid = speakeasy.totp.verify({
+      secret: twoFA.secret,
+      encoding: 'base32',
+      token: code,
+      window: 2 // Allow 2 intervals tolerance
+    });
+    
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+    
+    // Enable 2FA
+    twoFA.isEnabled = true;
+    twoFA.enabledAt = new Date();
+    await twoFA.save();
+    
+    // Update user
+    await User.findByIdAndUpdate(req.userId, { twoFactorEnabled: true });
+    
+    res.json({
+      success: true,
+      message: '2FA enabled successfully',
+      backupCodes: twoFA.backupCodes.map(b => b.code)
+    });
+    
+  } catch (error) {
+    console.error('2FA verify error:', error);
+    res.status(500).json({ error: 'Failed to verify 2FA' });
+  }
+});
+
+// Disable 2FA
+app.post('/api/auth/2fa/disable', authRequired, async (req, res) => {
+  try {
+    const { code, password } = req.body;
+    
+    if (!code || !password) {
+      return res.status(400).json({ error: 'Code and password required' });
+    }
+    
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Verify password
+    const isValidPassword = await bcrypt.compare(password, user.passwordHash);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid password' });
+    }
+    
+    const twoFA = await TwoFactorAuth.findOne({ userId: req.userId });
+    if (!twoFA || !twoFA.isEnabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    
+    // Verify the code
+    const isValid = speakeasy.totp.verify({
+      secret: twoFA.secret,
+      encoding: 'base32',
+      token: code,
+      window: 2
+    });
+    
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid verification code' });
+    }
+    
+    // Delete 2FA record
+    await TwoFactorAuth.deleteOne({ userId: req.userId });
+    await User.findByIdAndUpdate(req.userId, { twoFactorEnabled: false });
+    
+    res.json({ success: true, message: '2FA disabled successfully' });
+    
+  } catch (error) {
+    console.error('2FA disable error:', error);
+    res.status(500).json({ error: 'Failed to disable 2FA' });
+  }
+});
+
+// Get 2FA status
+app.get('/api/auth/2fa/status', authRequired, async (req, res) => {
+  try {
+    const twoFA = await TwoFactorAuth.findOne({ userId: req.userId });
+    
+    res.json({
+      success: true,
+      isEnabled: twoFA?.isEnabled || false,
+      enabledAt: twoFA?.enabledAt
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get 2FA status' });
+  }
+});
+
+// Verify 2FA during login
+app.post('/api/auth/2fa/login-verify', async (req, res) => {
+  try {
+    const { tempToken, code, useBackupCode } = req.body;
+    
+    if (!tempToken || !code) {
+      return res.status(400).json({ error: 'Token and code required' });
+    }
+    
+    // Verify temp token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, JWT_SECRET);
+    } catch (e) {
+      return res.status(401).json({ error: 'Session expired. Please login again.' });
+    }
+    
+    if (!decoded.pending2FA) {
+      return res.status(400).json({ error: 'Invalid token' });
+    }
+    
+    const twoFA = await TwoFactorAuth.findOne({ userId: decoded.userId });
+    if (!twoFA) {
+      return res.status(400).json({ error: '2FA not found' });
+    }
+    
+    let isValid = false;
+    
+    if (useBackupCode) {
+      // Check backup codes
+      const backupCode = twoFA.backupCodes.find(b => b.code === code && !b.used);
+      if (backupCode) {
+        backupCode.used = true;
+        await twoFA.save();
+        isValid = true;
+      }
+    } else {
+      // Verify TOTP
+      isValid = speakeasy.totp.verify({
+        secret: twoFA.secret,
+        encoding: 'base32',
+        token: code,
+        window: 2
+      });
+    }
+    
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid code' });
+    }
+    
+    // Get user and generate final token
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const token = jwt.sign(
+      { userId: user._id, role: user.role, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    
+    user.lastLogin = new Date();
+    user.isOnline = true;
+    await user.save();
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mobile: user.mobile,
+        studentCode: user.studentCode,
+        avatar: user.avatar
+      }
+    });
+    
+  } catch (error) {
+    console.error('2FA login verify error:', error);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// ========= FORGOT PASSWORD =========
+
+// Request password reset
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email, mobile } = req.body;
+    
+    if (!email && !mobile) {
+      return res.status(400).json({ error: 'Email or mobile required' });
+    }
+    
+    // Find user
+    const query = email ? { email: email.toLowerCase() } : { mobile };
+    const user = await User.findOne(query);
+    
+    if (!user) {
+      // Don't reveal if user exists
+      return res.json({ success: true, message: 'If an account exists, you will receive an OTP' });
+    }
+    
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
+    
+    if (email) {
+      // Send email OTP
+      const emailResult = await sendEmailOTP(email, otp, 'RESET_PASSWORD');
+      if (!emailResult.success) {
+        return res.status(500).json({ error: 'Failed to send OTP' });
+      }
+      
+      await OTP.findOneAndUpdate(
+        { email: email.toLowerCase(), purpose: 'RESET_PASSWORD' },
+        {
+          userId: user._id,
+          email: email.toLowerCase(),
+          otp: await bcrypt.hash(otp, 10),
+          type: 'EMAIL',
+          purpose: 'RESET_PASSWORD',
+          attempts: 0,
+          expiresAt: otpExpiry
+        },
+        { upsert: true }
+      );
+    } else {
+      // Send SMS OTP
+      const smsResult = await sendSmsOTP(mobile, otp, 'RESET_PASSWORD');
+      if (!smsResult.success) {
+        return res.status(500).json({ error: 'Failed to send OTP' });
+      }
+      
+      await OTP.findOneAndUpdate(
+        { mobile, purpose: 'RESET_PASSWORD' },
+        {
+          userId: user._id,
+          mobile,
+          otp: await bcrypt.hash(otp, 10),
+          type: 'SMS',
+          purpose: 'RESET_PASSWORD',
+          attempts: 0,
+          expiresAt: otpExpiry
+        },
+        { upsert: true }
+      );
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'OTP sent successfully',
+      otpType: email ? 'EMAIL' : 'SMS'
+    });
+    
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Failed to process request' });
+  }
+});
+
+// Verify OTP and get reset token
+app.post('/api/auth/forgot-password/verify', async (req, res) => {
+  try {
+    const { email, mobile, otp } = req.body;
+    
+    if ((!email && !mobile) || !otp) {
+      return res.status(400).json({ error: 'OTP and email/mobile required' });
+    }
+    
+    // Find OTP record
+    const query = email 
+      ? { email: email.toLowerCase(), purpose: 'RESET_PASSWORD' }
+      : { mobile, purpose: 'RESET_PASSWORD' };
+    
+    const otpRecord = await OTP.findOne(query);
+    
+    if (!otpRecord) {
+      return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+    }
+    
+    if (otpRecord.attempts >= 5) {
+      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
+    }
+    
+    const isValid = await bcrypt.compare(otp, otpRecord.otp);
+    if (!isValid) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return res.status(400).json({ error: 'Invalid OTP' });
+    }
+    
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    
+    await PasswordReset.create({
+      userId: otpRecord.userId,
+      token: resetToken,
+      otpVerified: true,
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
+    });
+    
+    // Delete OTP
+    await OTP.deleteOne({ _id: otpRecord._id });
+    
+    res.json({
+      success: true,
+      resetToken,
+      message: 'OTP verified. You can now reset your password.'
+    });
+    
+  } catch (error) {
+    console.error('Verify forgot password error:', error);
+    res.status(500).json({ error: 'Verification failed' });
+  }
+});
+
+// Reset password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { resetToken, newPassword } = req.body;
+    
+    if (!resetToken || !newPassword) {
+      return res.status(400).json({ error: 'Reset token and new password required' });
+    }
+    
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    }
+    
+    // Find reset record
+    const resetRecord = await PasswordReset.findOne({ token: resetToken, otpVerified: true });
+    
+    if (!resetRecord) {
+      return res.status(400).json({ error: 'Invalid or expired reset link' });
+    }
+    
+    // Update password
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await User.findByIdAndUpdate(resetRecord.userId, { passwordHash });
+    
+    // Delete reset record
+    await PasswordReset.deleteOne({ _id: resetRecord._id });
+    
+    console.log(`✅ Password reset for user: ${resetRecord.userId}`);
+    
+    res.json({ success: true, message: 'Password reset successfully' });
+    
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+});
+
+// ========= ENHANCED LOGIN WITH 2FA =========
+// Update existing login route to support 2FA
+app.post('/api/auth/login/enhanced', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password required' });
+    }
+    
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    const isValidPassword = await bcrypt.compare(password, user.passwordHash);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    
+    // Check if 2FA is enabled
+    const twoFA = await TwoFactorAuth.findOne({ userId: user._id, isEnabled: true });
+    
+    if (twoFA) {
+      // Generate temporary token for 2FA verification
+      const tempToken = jwt.sign(
+        { userId: user._id, pending2FA: true },
+        JWT_SECRET,
+        { expiresIn: '10m' }
+      );
+      
+      return res.json({
+        success: true,
+        requires2FA: true,
+        tempToken,
+        user: { name: user.name }
+      });
+    }
+    
+    // No 2FA - generate final token
+    const token = jwt.sign(
+      { userId: user._id, role: user.role, name: user.name },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    
+    user.lastLogin = new Date();
+    user.isOnline = true;
+    await user.save();
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        mobile: user.mobile,
+        studentCode: user.studentCode,
+        avatar: user.avatar
+      }
+    });
+    
+  } catch (error) {
+    console.error('Enhanced login error:', error);
+    res.status(500).json({ error: 'Login failed' });
   }
 });
 
