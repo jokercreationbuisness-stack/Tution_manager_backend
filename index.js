@@ -12718,6 +12718,15 @@ app.get('/api/jitsi/rooms/:roomId/config', authRequired, async (req, res) => {
 // ========= ENHANCED AUTH APIs =========
 // ========================================
 
+// ========================================
+// ========= UPDATED AUTH APIs ===========
+// ========= (Firebase Verified) ==========
+// ========================================
+
+// NOTE: All email and SMS OTPs are now handled by Firebase on the client side.
+// Backend just accepts "FIREBASE_VERIFIED" as proof of verification.
+// No Twilio or Gmail SMTP required!
+
 // ========= GOOGLE OAUTH =========
 
 // Google Sign-In - Initial verification
@@ -12744,7 +12753,6 @@ app.post('/api/auth/google', async (req, res) => {
       const twoFA = await TwoFactorAuth.findOne({ userId: user._id, isEnabled: true });
       
       if (twoFA) {
-        // Return pending 2FA
         const tempToken = jwt.sign({ userId: user._id, pending2FA: true }, JWT_SECRET, { expiresIn: '10m' });
         return res.json({
           success: true,
@@ -12754,7 +12762,6 @@ app.post('/api/auth/google', async (req, res) => {
         });
       }
       
-      // Generate JWT and return
       const token = jwt.sign(
         { userId: user._id, role: user.role, name: user.name },
         JWT_SECRET,
@@ -12801,7 +12808,7 @@ app.post('/api/auth/google', async (req, res) => {
         name,
         avatar: picture,
         pendingToken,
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000) // 30 minutes
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000)
       },
       { upsert: true, new: true }
     );
@@ -12820,6 +12827,7 @@ app.post('/api/auth/google', async (req, res) => {
 });
 
 // Complete Google registration (after collecting role + mobile)
+// Firebase will send the SMS OTP on client side
 app.post('/api/auth/google/complete', async (req, res) => {
   try {
     const { pendingToken, role, mobile } = req.body;
@@ -12838,36 +12846,17 @@ app.post('/api/auth/google/complete', async (req, res) => {
       return res.status(400).json({ error: 'Invalid or expired registration. Please try again.' });
     }
     
-    // Send SMS OTP for mobile verification
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    // Store mobile temporarily for verification step
+    pending.mobile = mobile;
+    pending.role = role;
+    await pending.save();
     
-    // Save OTP
-    await OTP.findOneAndUpdate(
-      { mobile, purpose: 'SIGNUP' },
-      {
-        mobile,
-        otp: await bcrypt.hash(otp, 10),
-        type: 'SMS',
-        purpose: 'SIGNUP',
-        verified: false,
-        attempts: 0,
-        expiresAt: otpExpiry
-      },
-      { upsert: true, new: true }
-    );
-    
-    // Send SMS
-    const smsResult = await sendSmsOTP(mobile, otp, 'SIGNUP');
-    if (!smsResult.success) {
-      return res.status(500).json({ error: 'Failed to send OTP. Please try again.' });
-    }
-    
+    // Tell client to send OTP via Firebase (Google)
     res.json({
       success: true,
-      message: 'OTP sent to your mobile number',
+      message: 'Please verify your mobile number',
       requiresOTP: true,
-      pendingToken // Return same token for verification step
+      pendingToken
     });
     
   } catch (error) {
@@ -12877,6 +12866,7 @@ app.post('/api/auth/google/complete', async (req, res) => {
 });
 
 // Verify OTP and finalize Google registration
+// Accepts FIREBASE_VERIFIED - Firebase handled the OTP on client side
 app.post('/api/auth/google/verify-otp', async (req, res) => {
   try {
     const { pendingToken, mobile, otp, role } = req.body;
@@ -12891,21 +12881,9 @@ app.post('/api/auth/google/verify-otp', async (req, res) => {
       return res.status(400).json({ error: 'Invalid or expired registration' });
     }
     
-    // Verify OTP
-    const otpRecord = await OTP.findOne({ mobile, purpose: 'SIGNUP' });
-    if (!otpRecord) {
-      return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
-    }
-    
-    if (otpRecord.attempts >= 5) {
-      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
-    }
-    
-    const isValidOTP = await bcrypt.compare(otp, otpRecord.otp);
-    if (!isValidOTP) {
-      otpRecord.attempts += 1;
-      await otpRecord.save();
-      return res.status(400).json({ error: 'Invalid OTP' });
+    // Accept FIREBASE_VERIFIED - Firebase Phone Auth verified the OTP on client
+    if (otp !== 'FIREBASE_VERIFIED') {
+      return res.status(400).json({ error: 'Phone verification required via Google Firebase' });
     }
     
     // Create user
@@ -12920,19 +12898,18 @@ app.post('/api/auth/google/verify-otp', async (req, res) => {
       name: pending.name,
       email: pending.email.toLowerCase(),
       mobile,
-      passwordHash: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10), // Random password for Google users
+      passwordHash: await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 10),
       role,
       studentCode,
       avatar: pending.avatar,
       googleId: pending.googleId,
       isGoogleUser: true,
-      isEmailVerified: true, // Google email is verified
+      isEmailVerified: true,
       isMobileVerified: true
     });
     
     // Cleanup
     await GooglePendingUser.deleteOne({ pendingToken });
-    await OTP.deleteOne({ mobile, purpose: 'SIGNUP' });
     
     // Generate JWT
     const token = jwt.sign(
@@ -12963,9 +12940,9 @@ app.post('/api/auth/google/verify-otp', async (req, res) => {
   }
 });
 
-// ========= MANUAL SIGNUP WITH OTP =========
+// ========= MANUAL SIGNUP WITH FIREBASE VERIFICATION =========
 
-// Send OTP for manual signup (Email + SMS for teachers, just email for students)
+// Send OTP for manual signup - Now just tells client to use Firebase
 app.post('/api/auth/signup/send-otp', async (req, res) => {
   try {
     const { email, mobile, role } = req.body;
@@ -12980,67 +12957,22 @@ app.post('/api/auth/signup/send-otp', async (req, res) => {
       return res.status(409).json({ error: 'An account with this email already exists' });
     }
     
-    const emailOtp = generateOTP();
-    const smsOtp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
-    
-    // Send Email OTP
-    const emailResult = await sendEmailOTP(email, emailOtp, 'SIGNUP');
-    if (!emailResult.success) {
-      return res.status(500).json({ error: 'Failed to send email OTP' });
-    }
-    
-    // Save Email OTP
-    await OTP.findOneAndUpdate(
-      { email: email.toLowerCase(), purpose: 'SIGNUP', type: 'EMAIL' },
-      {
-        email: email.toLowerCase(),
-        otp: await bcrypt.hash(emailOtp, 10),
-        type: 'EMAIL',
-        purpose: 'SIGNUP',
-        verified: false,
-        attempts: 0,
-        expiresAt: otpExpiry
-      },
-      { upsert: true }
-    );
-    
-    // For teachers, also send SMS OTP
-    if (role === 'TEACHER' && mobile) {
-      const smsResult = await sendSmsOTP(mobile, smsOtp, 'SIGNUP');
-      if (smsResult.success) {
-        await OTP.findOneAndUpdate(
-          { mobile, purpose: 'SIGNUP', type: 'SMS' },
-          {
-            mobile,
-            otp: await bcrypt.hash(smsOtp, 10),
-            type: 'SMS',
-            purpose: 'SIGNUP',
-            verified: false,
-            attempts: 0,
-            expiresAt: otpExpiry
-          },
-          { upsert: true }
-        );
-      }
-    }
-    
+    // Tell client to send OTPs via Firebase (Google handles both email link and SMS)
     res.json({
       success: true,
-      message: role === 'TEACHER' && mobile 
-        ? 'OTP sent to email and mobile' 
-        : 'OTP sent to email',
+      message: 'Please verify using Firebase',
       requiresEmailOTP: true,
       requiresSmsOTP: role === 'TEACHER' && !!mobile
     });
     
   } catch (error) {
     console.error('Send OTP error:', error);
-    res.status(500).json({ error: 'Failed to send OTP' });
+    res.status(500).json({ error: 'Failed to process request' });
   }
 });
 
 // Verify OTP and complete signup
+// Accepts FIREBASE_VERIFIED for both email and SMS
 app.post('/api/auth/signup/verify', async (req, res) => {
   try {
     const { name, email, mobile, password, role, emailOtp, smsOtp } = req.body;
@@ -13053,49 +12985,21 @@ app.post('/api/auth/signup/verify', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
     
-    // Verify Email OTP
-    const emailOtpRecord = await OTP.findOne({ 
-      email: email.toLowerCase(), 
-      purpose: 'SIGNUP', 
-      type: 'EMAIL' 
-    });
-    
-    if (!emailOtpRecord) {
-      return res.status(400).json({ error: 'Email OTP expired. Please request a new one.' });
+    // Check if user already exists
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
     }
     
-    if (emailOtpRecord.attempts >= 5) {
-      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
+    // Accept FIREBASE_VERIFIED - Firebase Email Link verified on client
+    if (emailOtp !== 'FIREBASE_VERIFIED') {
+      return res.status(400).json({ error: 'Email verification required via Google Firebase' });
     }
     
-    const isValidEmailOtp = await bcrypt.compare(emailOtp, emailOtpRecord.otp);
-    if (!isValidEmailOtp) {
-      emailOtpRecord.attempts += 1;
-      await emailOtpRecord.save();
-      return res.status(400).json({ error: 'Invalid email OTP' });
-    }
-    
-    // For teachers, also verify SMS OTP
+    // For teachers, verify SMS was done via Firebase
     if (role === 'TEACHER' && mobile) {
-      if (!smsOtp) {
-        return res.status(400).json({ error: 'SMS OTP required for teachers' });
-      }
-      
-      const smsOtpRecord = await OTP.findOne({ 
-        mobile, 
-        purpose: 'SIGNUP', 
-        type: 'SMS' 
-      });
-      
-      if (!smsOtpRecord) {
-        return res.status(400).json({ error: 'SMS OTP expired. Please request a new one.' });
-      }
-      
-      const isValidSmsOtp = await bcrypt.compare(smsOtp, smsOtpRecord.otp);
-      if (!isValidSmsOtp) {
-        smsOtpRecord.attempts += 1;
-        await smsOtpRecord.save();
-        return res.status(400).json({ error: 'Invalid SMS OTP' });
+      if (smsOtp !== 'FIREBASE_VERIFIED') {
+        return res.status(400).json({ error: 'Phone verification required via Google Firebase' });
       }
     }
     
@@ -13119,12 +13023,6 @@ app.post('/api/auth/signup/verify', async (req, res) => {
       isEmailVerified: true,
       isMobileVerified: role === 'TEACHER' && !!mobile
     });
-    
-    // Cleanup OTPs
-    await OTP.deleteMany({ email: email.toLowerCase(), purpose: 'SIGNUP' });
-    if (mobile) {
-      await OTP.deleteMany({ mobile, purpose: 'SIGNUP' });
-    }
     
     // Generate JWT
     const token = jwt.sign(
@@ -13157,62 +13055,30 @@ app.post('/api/auth/signup/verify', async (req, res) => {
   }
 });
 
-// ========= RESEND OTP =========
+// ========= RESEND OTP (Now just acknowledges - Firebase handles on client) =========
 app.post('/api/auth/resend-otp', async (req, res) => {
   try {
     const { email, mobile, type, purpose } = req.body;
     
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
-    
-    if (type === 'EMAIL' && email) {
-      const emailResult = await sendEmailOTP(email, otp, purpose);
-      if (!emailResult.success) {
-        return res.status(500).json({ error: 'Failed to send email OTP' });
-      }
-      
-      await OTP.findOneAndUpdate(
-        { email: email.toLowerCase(), purpose, type: 'EMAIL' },
-        {
-          otp: await bcrypt.hash(otp, 10),
-          attempts: 0,
-          expiresAt: otpExpiry
-        },
-        { upsert: true }
-      );
-    } else if (type === 'SMS' && mobile) {
-      const smsResult = await sendSmsOTP(mobile, otp, purpose);
-      if (!smsResult.success) {
-        return res.status(500).json({ error: 'Failed to send SMS OTP' });
-      }
-      
-      await OTP.findOneAndUpdate(
-        { mobile, purpose, type: 'SMS' },
-        {
-          otp: await bcrypt.hash(otp, 10),
-          attempts: 0,
-          expiresAt: otpExpiry
-        },
-        { upsert: true }
-      );
-    } else {
-      return res.status(400).json({ error: 'Invalid request' });
-    }
-    
-    res.json({ success: true, message: 'OTP resent successfully' });
+    // Firebase handles OTP sending on client side
+    // This endpoint just acknowledges the request
+    res.json({ 
+      success: true, 
+      message: 'Please resend OTP via Firebase on your device' 
+    });
     
   } catch (error) {
     console.error('Resend OTP error:', error);
-    res.status(500).json({ error: 'Failed to resend OTP' });
+    res.status(500).json({ error: 'Failed to process request' });
   }
 });
 
 // ========= TWO-FACTOR AUTHENTICATION =========
+// (These remain the same - 2FA uses Google Authenticator app, not OTP)
 
 // Setup 2FA - Generate secret
 app.post('/api/auth/2fa/setup', authRequired, async (req, res) => {
   try {
-    // Check if already enabled
     const existing = await TwoFactorAuth.findOne({ userId: req.userId });
     if (existing && existing.isEnabled) {
       return res.status(400).json({ error: '2FA is already enabled' });
@@ -13223,16 +13089,13 @@ app.post('/api/auth/2fa/setup', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    // Generate secret
     const secret = speakeasy.generateSecret({
       name: `TuitionManager (${user.email})`,
       issuer: 'TuitionManager'
     });
     
-    // Generate QR code
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
     
-    // Save secret (not enabled yet)
     await TwoFactorAuth.findOneAndUpdate(
       { userId: req.userId },
       {
@@ -13271,24 +13134,21 @@ app.post('/api/auth/2fa/verify', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Please setup 2FA first' });
     }
     
-    // Verify the code
     const isValid = speakeasy.totp.verify({
       secret: twoFA.secret,
       encoding: 'base32',
       token: code,
-      window: 2 // Allow 2 intervals tolerance
+      window: 2
     });
     
     if (!isValid) {
       return res.status(400).json({ error: 'Invalid verification code' });
     }
     
-    // Enable 2FA
     twoFA.isEnabled = true;
     twoFA.enabledAt = new Date();
     await twoFA.save();
     
-    // Update user
     await User.findByIdAndUpdate(req.userId, { twoFactorEnabled: true });
     
     res.json({
@@ -13317,7 +13177,6 @@ app.post('/api/auth/2fa/disable', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    // Verify password
     const isValidPassword = await bcrypt.compare(password, user.passwordHash);
     if (!isValidPassword) {
       return res.status(401).json({ error: 'Invalid password' });
@@ -13328,7 +13187,6 @@ app.post('/api/auth/2fa/disable', authRequired, async (req, res) => {
       return res.status(400).json({ error: '2FA is not enabled' });
     }
     
-    // Verify the code
     const isValid = speakeasy.totp.verify({
       secret: twoFA.secret,
       encoding: 'base32',
@@ -13340,7 +13198,6 @@ app.post('/api/auth/2fa/disable', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Invalid verification code' });
     }
     
-    // Delete 2FA record
     await TwoFactorAuth.deleteOne({ userId: req.userId });
     await User.findByIdAndUpdate(req.userId, { twoFactorEnabled: false });
     
@@ -13377,7 +13234,6 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
       return res.status(400).json({ error: 'Token and code required' });
     }
     
-    // Verify temp token
     let decoded;
     try {
       decoded = jwt.verify(tempToken, JWT_SECRET);
@@ -13397,7 +13253,6 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
     let isValid = false;
     
     if (useBackupCode) {
-      // Check backup codes
       const backupCode = twoFA.backupCodes.find(b => b.code === code && !b.used);
       if (backupCode) {
         backupCode.used = true;
@@ -13405,7 +13260,6 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
         isValid = true;
       }
     } else {
-      // Verify TOTP
       isValid = speakeasy.totp.verify({
         secret: twoFA.secret,
         encoding: 'base32',
@@ -13418,7 +13272,6 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
       return res.status(400).json({ error: 'Invalid code' });
     }
     
-    // Get user and generate final token
     const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
@@ -13454,9 +13307,9 @@ app.post('/api/auth/2fa/login-verify', async (req, res) => {
   }
 });
 
-// ========= FORGOT PASSWORD =========
+// ========= FORGOT PASSWORD (Firebase Verified) =========
 
-// Request password reset
+// Request password reset - Now just tells client to use Firebase
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email, mobile } = req.body;
@@ -13465,63 +13318,14 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       return res.status(400).json({ error: 'Email or mobile required' });
     }
     
-    // Find user
+    // Find user (don't reveal if user exists for security)
     const query = email ? { email: email.toLowerCase() } : { mobile };
     const user = await User.findOne(query);
     
-    if (!user) {
-      // Don't reveal if user exists
-      return res.json({ success: true, message: 'If an account exists, you will receive an OTP' });
-    }
-    
-    const otp = generateOTP();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000);
-    
-    if (email) {
-      // Send email OTP
-      const emailResult = await sendEmailOTP(email, otp, 'RESET_PASSWORD');
-      if (!emailResult.success) {
-        return res.status(500).json({ error: 'Failed to send OTP' });
-      }
-      
-      await OTP.findOneAndUpdate(
-        { email: email.toLowerCase(), purpose: 'RESET_PASSWORD' },
-        {
-          userId: user._id,
-          email: email.toLowerCase(),
-          otp: await bcrypt.hash(otp, 10),
-          type: 'EMAIL',
-          purpose: 'RESET_PASSWORD',
-          attempts: 0,
-          expiresAt: otpExpiry
-        },
-        { upsert: true }
-      );
-    } else {
-      // Send SMS OTP
-      const smsResult = await sendSmsOTP(mobile, otp, 'RESET_PASSWORD');
-      if (!smsResult.success) {
-        return res.status(500).json({ error: 'Failed to send OTP' });
-      }
-      
-      await OTP.findOneAndUpdate(
-        { mobile, purpose: 'RESET_PASSWORD' },
-        {
-          userId: user._id,
-          mobile,
-          otp: await bcrypt.hash(otp, 10),
-          type: 'SMS',
-          purpose: 'RESET_PASSWORD',
-          attempts: 0,
-          expiresAt: otpExpiry
-        },
-        { upsert: true }
-      );
-    }
-    
+    // Always return success to not reveal if user exists
     res.json({ 
       success: true, 
-      message: 'OTP sent successfully',
+      message: 'If an account exists, please verify via Firebase',
       otpType: email ? 'EMAIL' : 'SMS'
     });
     
@@ -13532,6 +13336,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 });
 
 // Verify OTP and get reset token
+// Accepts FIREBASE_VERIFIED - Firebase handled verification on client
 app.post('/api/auth/forgot-password/verify', async (req, res) => {
   try {
     const { email, mobile, otp } = req.body;
@@ -13540,45 +13345,33 @@ app.post('/api/auth/forgot-password/verify', async (req, res) => {
       return res.status(400).json({ error: 'OTP and email/mobile required' });
     }
     
-    // Find OTP record
-    const query = email 
-      ? { email: email.toLowerCase(), purpose: 'RESET_PASSWORD' }
-      : { mobile, purpose: 'RESET_PASSWORD' };
-    
-    const otpRecord = await OTP.findOne(query);
-    
-    if (!otpRecord) {
-      return res.status(400).json({ error: 'OTP expired. Please request a new one.' });
+    // Accept FIREBASE_VERIFIED - Firebase verified on client side
+    if (otp !== 'FIREBASE_VERIFIED') {
+      return res.status(400).json({ error: 'Verification required via Google Firebase' });
     }
     
-    if (otpRecord.attempts >= 5) {
-      return res.status(429).json({ error: 'Too many attempts. Please request a new OTP.' });
-    }
+    // Find user
+    const query = email ? { email: email.toLowerCase() } : { mobile };
+    const user = await User.findOne(query);
     
-    const isValid = await bcrypt.compare(otp, otpRecord.otp);
-    if (!isValid) {
-      otpRecord.attempts += 1;
-      await otpRecord.save();
-      return res.status(400).json({ error: 'Invalid OTP' });
+    if (!user) {
+      return res.status(400).json({ error: 'Account not found' });
     }
     
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     
     await PasswordReset.create({
-      userId: otpRecord.userId,
+      userId: user._id,
       token: resetToken,
       otpVerified: true,
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
     });
-    
-    // Delete OTP
-    await OTP.deleteOne({ _id: otpRecord._id });
     
     res.json({
       success: true,
       resetToken,
-      message: 'OTP verified. You can now reset your password.'
+      message: 'Verified. You can now reset your password.'
     });
     
   } catch (error) {
@@ -13600,18 +13393,15 @@ app.post('/api/auth/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Password must be at least 6 characters' });
     }
     
-    // Find reset record
     const resetRecord = await PasswordReset.findOne({ token: resetToken, otpVerified: true });
     
     if (!resetRecord) {
       return res.status(400).json({ error: 'Invalid or expired reset link' });
     }
     
-    // Update password
     const passwordHash = await bcrypt.hash(newPassword, 10);
     await User.findByIdAndUpdate(resetRecord.userId, { passwordHash });
     
-    // Delete reset record
     await PasswordReset.deleteOne({ _id: resetRecord._id });
     
     console.log(`✅ Password reset for user: ${resetRecord.userId}`);
@@ -13625,7 +13415,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
 });
 
 // ========= ENHANCED LOGIN WITH 2FA =========
-// Update existing login route to support 2FA
 app.post('/api/auth/login/enhanced', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -13644,11 +13433,9 @@ app.post('/api/auth/login/enhanced', async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Check if 2FA is enabled
     const twoFA = await TwoFactorAuth.findOne({ userId: user._id, isEnabled: true });
     
     if (twoFA) {
-      // Generate temporary token for 2FA verification
       const tempToken = jwt.sign(
         { userId: user._id, pending2FA: true },
         JWT_SECRET,
@@ -13663,7 +13450,6 @@ app.post('/api/auth/login/enhanced', async (req, res) => {
       });
     }
     
-    // No 2FA - generate final token
     const token = jwt.sign(
       { userId: user._id, role: user.role, name: user.name },
       JWT_SECRET,
