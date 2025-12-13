@@ -1414,11 +1414,6 @@ const getInviteLink = (inviteCode) => {
 
 // ========= OTP HELPER FUNCTIONS =========
 
-// Generate 6-digit OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
-
 // Send Email OTP
 const sendEmailOTP = async (email, otp, purpose) => {
   const subjects = {
