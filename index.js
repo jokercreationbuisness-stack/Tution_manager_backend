@@ -1731,47 +1731,60 @@ socket.on('get-request-count', async (callback) => {
   });
 
   socket.on('join_conversation', async (conversationId) => {
-    if (!socket.userId) {
-      socket.emit('error', { error: 'Authentication required' });
+  if (!socket.userId) {
+    socket.emit('error', { error: 'Authentication required' });
+    return;
+  }
+  socket.join(`conversation_${conversationId}`);
+  
+  // 🚀 FIX: Skip MongoDB query if conversationId is not a valid ObjectId
+  // Your app uses string format like "conv_xxx_yyy" which is NOT a MongoDB ObjectId
+  try {
+    // Check if conversationId is a valid MongoDB ObjectId (24 hex characters)
+    const isValidObjectId = mongoose.Types.ObjectId.isValid(conversationId) && 
+                            String(new mongoose.Types.ObjectId(conversationId)) === conversationId;
+    
+    if (!isValidObjectId) {
+      // String conversationId format - relay-only mode, no MongoDB operations
+      console.log(`📱 Joined conversation (relay-only): ${conversationId}`);
       return;
     }
-    socket.join(`conversation_${conversationId}`);
     
-    // ✅ MARK UNDELIVERED MESSAGES AS DELIVERED (single tick → double tick)
-    try {
-      const undeliveredMessages = await Message.find({
-        conversationId: conversationId,
-        receiverId: socket.userId,
-        delivered: false
+    // Only query MongoDB if conversationId is a valid ObjectId
+    const undeliveredMessages = await Message.find({
+      conversationId: conversationId,
+      receiverId: socket.userId,
+      delivered: false
+    });
+    
+    if (undeliveredMessages.length > 0) {
+      await Message.updateMany(
+        {
+          conversationId: conversationId,
+          receiverId: socket.userId,
+          delivered: false
+        },
+        {
+          $set: {
+            delivered: true,
+            deliveredAt: new Date()
+          }
+        }
+      );
+      
+      undeliveredMessages.forEach(msg => {
+        io.to(`conversation_${conversationId}`).emit('message_delivered', {
+          messageId: msg._id.toString()
+        });
       });
       
-      if (undeliveredMessages.length > 0) {
-        await Message.updateMany(
-          {
-            conversationId: conversationId,
-            receiverId: socket.userId,
-            delivered: false
-          },
-          {
-            $set: {
-              delivered: true,
-              deliveredAt: new Date()
-            }
-          }
-        );
-        
-        undeliveredMessages.forEach(msg => {
-          io.to(`conversation_${conversationId}`).emit('message_delivered', {
-            messageId: msg._id.toString()
-          });
-        });
-        
-        console.log(`✅ Marked ${undeliveredMessages.length} messages as delivered`);
-      }
-    } catch (error) {
-      console.error('Error marking messages as delivered:', error);
+      console.log(`✅ Marked ${undeliveredMessages.length} messages as delivered`);
     }
-  });
+  } catch (error) {
+    // Log but don't crash - this is non-critical for relay-only chat
+    console.log(`⚠️ Skipping delivery marking for conversation: ${conversationId}`);
+  }
+});
 
   socket.on('leave_conversation', (conversationId) => {
     socket.leave(`conversation_${conversationId}`);
