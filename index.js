@@ -1577,83 +1577,88 @@ io.on('connection', (socket) => {
   let currentSessionIdInCall = null;
 
   // ========= AUTHENTICATION & BASIC HANDLERS =========
-  socket.on('authenticate', async (data) => {
-    try {
-      if (!data || !data.token) {
-        socket.emit('auth_error', { error: 'Authentication token is required' });
-        return;
-      }
-
-      const { token } = data;
-      const decoded = jwt.verify(token, JWT_SECRET);
-      const user = await User.findById(decoded.sub).select('isActive role name email');
-      
-      if (!user) {
-        socket.emit('auth_error', { error: 'User not found' });
-        return;
-      }
-      
-      if (!user.isActive) {
-        socket.emit('auth_error', { error: 'Account is deactivated' });
-        return;
-      }
-
-      socket.userId = decoded.sub;
-      socket.role = decoded.role;
-      socket.userEmail = decoded.email;
-      
-      const previousSocketId = connectedUsers.get(socket.userId);
-      if (previousSocketId) {
-        const previousSocket = io.sockets.sockets.get(previousSocketId);
-        if (previousSocket && previousSocket.id !== socket.id) {
-          previousSocket.emit('session_expired', { message: 'Logged in from another device' });
-          previousSocket.disconnect(true);
-        }
-      }
-      
-      connectedUsers.set(socket.userId, socket.id);
-      onlineUsers.set(socket.userId, socket.id);
-      socket.join(socket.userId);
-      
-      await User.findByIdAndUpdate(socket.userId, {
-        isOnline: true,
-        lastSeen: new Date()
-      });
-      
-      io.emit('user_online', { 
-        userId: socket.userId,
-        userInfo: {
-          name: user.name,
-          role: user.role,
-          email: user.email
-        }
-      });
-      
-      socket.emit('authenticated', { 
-        success: true,
-        user: {
-          id: socket.userId,
-          name: user.name,
-          email: user.email,
-          role: user.role
-        }
-      });
-      
-    } catch (error) {
-      console.error('❌ Authentication error:', error.message);
-      let errorMessage = 'Authentication failed';
-      if (error.name === 'JsonWebTokenError') {
-        errorMessage = 'Invalid token';
-      } else if (error.name === 'TokenExpiredError') {
-        errorMessage = 'Token expired';
-      }
-      
-      socket.emit('auth_error', { 
-        error: errorMessage,
-        details: process.env.NODE_ENV === 'development' ? error.message : undefined
-      });
+socket.on('authenticate', async (data) => {
+  try {
+    if (!data || !data.token) {
+      socket.emit('auth_error', { error: 'Authentication token is required' });
+      return;
     }
-  });
+
+    const { token } = data;
+    const decoded = jwt.verify(token, JWT_SECRET);
+    
+    // 🚀 FIX: Use decoded.userId (matches your JWT creation)
+    const user = await User.findById(decoded.userId).select('isActive role name email');
+    
+    if (!user) {
+      socket.emit('auth_error', { error: 'User not found' });
+      return;
+    }
+    
+    if (!user.isActive) {
+      socket.emit('auth_error', { error: 'Account is deactivated' });
+      return;
+    }
+
+    // 🚀 FIX: Use decoded.userId here too
+    socket.userId = decoded.userId;
+    socket.role = decoded.role;
+    socket.userEmail = user.email;  // Get email from user object, not token
+    
+    const previousSocketId = connectedUsers.get(socket.userId);
+    if (previousSocketId) {
+      const previousSocket = io.sockets.sockets.get(previousSocketId);
+      if (previousSocket && previousSocket.id !== socket.id) {
+        previousSocket.emit('session_expired', { message: 'Logged in from another device' });
+        previousSocket.disconnect(true);
+      }
+    }
+    
+    connectedUsers.set(socket.userId, socket.id);
+    onlineUsers.set(socket.userId, socket.id);
+    socket.join(socket.userId);
+    
+    await User.findByIdAndUpdate(socket.userId, {
+      isOnline: true,
+      lastSeen: new Date()
+    });
+    
+    io.emit('user_online', { 
+      userId: socket.userId,
+      userInfo: {
+        name: user.name,
+        role: user.role,
+        email: user.email
+      }
+    });
+    
+    socket.emit('authenticated', { 
+      success: true,
+      user: {
+        id: socket.userId,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+    
+    console.log(`✅ User authenticated: ${user.name} (${socket.userId})`);
+    
+  } catch (error) {
+    console.error('❌ Authentication error:', error.message);
+    let errorMessage = 'Authentication failed';
+    if (error.name === 'JsonWebTokenError') {
+      errorMessage = 'Invalid token';
+    } else if (error.name === 'TokenExpiredError') {
+      errorMessage = 'Token expired';
+    }
+    
+    socket.emit('auth_error', { 
+      error: errorMessage,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 
   // Location: Add inside io.on('connection') handler (around line 2800)
 
