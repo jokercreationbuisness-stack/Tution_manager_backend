@@ -386,13 +386,14 @@ const AssignmentSchema = new Schema({
   status: { type: String, enum: ['PENDING', 'IN_PROGRESS', 'COMPLETED', 'OVERDUE'], default: 'PENDING' },
   scope: { type: String, enum: ['ALL', 'INDIVIDUAL'], default: 'ALL' },
   studentId: { type: Types.ObjectId, ref: 'User' },
+  sectionId: { type: Types.ObjectId, ref: 'Section' },
   attachments: [{
-    filename: String,
-    originalName: String,      // ← ADD THIS
-    url: String,
-    type: String,
-    size: Number,
-    cloudinaryId: String,      // ← ADD THIS
+    filename: { type: String },
+    originalName: { type: String },
+    url: { type: String },
+    type: { type: String },
+    size: { type: Number },
+    cloudinaryId: { type: String },
     uploadedAt: { type: Date, default: Date.now }
   }],
   maxMarks: { type: Number },
