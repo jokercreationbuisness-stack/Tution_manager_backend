@@ -28,22 +28,24 @@ cloudinary.config({
 });
 
 // Cloudinary storage for education files
+// In your backend server.js - update educationCloudStorage
 const educationCloudStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: async (req, file) => {
-    const folder = `tuition_manager/${req.params.type || 'general'}`;
+    const folder = `tuition_manager/${req.params.type || 'submissions'}`;
     const ext = file.originalname.split('.').pop().toLowerCase();
     let resourceType = 'auto';
     
-    if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'zip', 'rar'].includes(ext)) {
+    // Use 'raw' for non-image files
+    if (!['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext)) {
       resourceType = 'raw';
     }
     
     return {
       folder: folder,
       resource_type: resourceType,
-      public_id: `${Date.now()}-${file.originalname.replace(/\.[^/.]+$/, '')}`,
-      allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'zip', 'rar']
+      public_id: `${Date.now()}-${file.originalname.replace(/\.[^/.]+$/, '')}`
+      // REMOVE allowed_formats to accept all file types
     };
   }
 });
@@ -5036,9 +5038,9 @@ app.post('/api/student/assignments/:id/submit', authRequired, requireRole('STUDE
       }
     });
   } catch (error) {
-    console.error('Submit assignment error:', error);
-    res.status(500).json({ error: 'Failed to submit assignment' });
-  }
+    console.error('Submit assignment error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to submit assignment', details: error.message });
+}
 });
 
 // Get student's submission for an assignment
@@ -14742,9 +14744,9 @@ app.post('/api/student/assignments/:id/submit', authRequired, requireRole('STUDE
       }
     });
   } catch (error) {
-    console.error('Submit assignment error:', error);
-    res.status(500).json({ error: 'Failed to submit assignment' });
-  }
+    console.error('Submit assignment error:', error.message, error.stack);
+    res.status(500).json({ error: 'Failed to submit assignment', details: error.message });
+}
 });
 
 // Update submission (Student - before graded)
