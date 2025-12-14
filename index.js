@@ -395,9 +395,9 @@ const AssignmentSchema = new Schema({
     url: { type: String },
     type: { type: String },
     size: { type: Number },
-    cloudinaryId: { type: String },
+    cloudinaryId: { type: String },  // Required - code saves this
     uploadedAt: { type: Date, default: Date.now }
-  }],
+}],
   maxMarks: { type: Number },
   submissionCount: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now },
@@ -426,16 +426,18 @@ AssignmentSubmissionSchema.index({ assignmentId: 1, studentId: 1 }, { unique: tr
 // ========= LOCATION: Add after AssignmentSubmissionSchema =========
 
 // Student Assignment Submission Schema (Enhanced)
+// Student Assignment Submission Schema (Enhanced)
 const StudentSubmissionSchema = new Schema({
   assignmentId: { type: Types.ObjectId, ref: 'Assignment', required: true },
   studentId: { type: Types.ObjectId, ref: 'User', required: true },
-  content: { type: String }, // Text content/notes
+  content: { type: String },
   attachments: [{
-    filename: String,
-    originalName: String,
-    url: String,
-    type: String, // pdf, image, doc, etc.
-    size: Number,
+    filename: { type: String },
+    originalName: { type: String },
+    url: { type: String },
+    type: { type: String },
+    size: { type: Number },
+    cloudinaryId: { type: String },  // ADD THIS - code is saving it
     uploadedAt: { type: Date, default: Date.now }
   }],
   submittedAt: { type: Date, default: Date.now },
