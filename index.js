@@ -5787,61 +5787,6 @@ app.get('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req
 // ========= ASSIGNMENT MANAGEMENT =========
 // ========= LOCATION: Replace existing POST /api/teacher/assignments =========
 
-// Create assignment with file attachments
-app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), educationUpload.array('attachments', 10), async (req, res) => {
-  try {
-    const { title, description, dueAt, subject, classId, notes, priority, maxMarks, scope, sectionId, studentId } = req.body;
-    
-    if (!title || !dueAt) {
-      return res.status(400).json({ error: 'Title and due date are required' });
-    }
-    
-    // Process uploaded files
-    const attachments = [];
-    if (req.files && req.files.length > 0) {
-      for (const file of req.files) {
-        attachments.push({
-          filename: file.filename,
-          originalName: file.originalname,
-          url: `/uploads/education/assignment/${file.filename}`,
-          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
-          size: file.size,
-          uploadedAt: new Date()
-        });
-      }
-    }
-    
-    const assignment = await Assignment.create({
-      teacherId: req.userId,
-      title,
-      description: description || notes,
-      dueAt: new Date(dueAt),
-      classId,
-      notes,
-      priority: priority || 1,
-      maxMarks,
-      scope: scope || 'ALL',
-      sectionId,
-      studentId,
-      attachments
-    });
-    
-    console.log(`📝 Assignment created: ${title} with ${attachments.length} attachments`);
-    
-    res.status(201).json({ 
-      success: true, 
-      assignment: {
-        id: assignment._id.toString(),
-        title: assignment.title,
-        attachments: assignment.attachments
-      }
-    });
-  } catch (error) {
-    console.error('Create assignment error:', error);
-    res.status(500).json({ error: 'Failed to create assignment' });
-  }
-});
-
 // Get assignment details with attachments
 app.get('/api/teacher/assignments/:id', authRequired, async (req, res) => {
   try {
