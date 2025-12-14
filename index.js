@@ -15035,6 +15035,284 @@ app.delete('/api/student/personal-notes/:id', authRequired, requireRole('STUDENT
   }
 });
 
+// ========= LOCATION: Add before CATCH-ALL ROUTE =========
+// ========= AI BUDDY ENDPOINTS (Groq Primary + Gemini Fallback) =========
+
+const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// Initialize AI clients
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// Constants
+const MAX_INPUT_WORDS = 500; // Word limit for user input
+const RATE_LIMIT_COOLDOWN = 60000; // 1 minute cooldown message
+
+// Track rate limit status
+let groqRateLimited = false;
+let groqRateLimitResetTime = 0;
+let geminiRateLimited = false;
+let geminiRateLimitResetTime = 0;
+
+// Helper: Count words
+const countWords = (text) => {
+  return text.trim().split(/\s+/).filter(word => word.length > 0).length;
+};
+
+// Helper: Call Groq API (Text only)
+const callGroqAPI = async (message) => {
+  // Check if rate limited
+  if (groqRateLimited && Date.now() < groqRateLimitResetTime) {
+    throw { isRateLimit: true, provider: 'groq' };
+  }
+  
+  try {
+    const completion = await groq.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content: "You are a helpful AI study assistant for students. Be concise, educational, and friendly. Help with homework, explain concepts, and solve problems. Format math equations properly."
+        },
+        { role: "user", content: message }
+      ],
+      model: "llama-3.3-70b-versatile",
+      temperature: 0.7,
+      max_tokens: 4096
+    });
+    
+    // Reset rate limit status on success
+    groqRateLimited = false;
+    
+    return {
+      success: true,
+      response: completion.choices[0]?.message?.content || "I couldn't generate a response.",
+      provider: 'groq'
+    };
+  } catch (error) {
+    console.error('Groq API error:', error.message);
+    
+    // Check for rate limit error
+    if (error.status === 429 || error.message?.includes('rate') || error.message?.includes('limit')) {
+      groqRateLimited = true;
+      groqRateLimitResetTime = Date.now() + 60000; // 1 minute cooldown
+      throw { isRateLimit: true, provider: 'groq' };
+    }
+    throw error;
+  }
+};
+
+// Helper: Call Gemini API (Text and Files)
+const callGeminiAPI = async (message, fileData = null) => {
+  // Check if rate limited
+  if (geminiRateLimited && Date.now() < geminiRateLimitResetTime) {
+    throw { isRateLimit: true, provider: 'gemini' };
+  }
+  
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    let result;
+    if (fileData) {
+      // Handle file with text
+      const parts = [
+        { text: `You are a helpful AI study assistant. Analyze this file and respond to: ${message}` },
+        {
+          inlineData: {
+            mimeType: fileData.mimeType,
+            data: fileData.base64
+          }
+        }
+      ];
+      result = await model.generateContent(parts);
+    } else {
+      // Text only
+      const prompt = `You are a helpful AI study assistant for students. Be concise, educational, and friendly. Help with homework, explain concepts, and solve problems. Format math equations properly.\n\nUser: ${message}`;
+      result = await model.generateContent(prompt);
+    }
+    
+    // Reset rate limit status on success
+    geminiRateLimited = false;
+    
+    const response = result.response;
+    return {
+      success: true,
+      response: response.text() || "I couldn't generate a response.",
+      provider: 'gemini'
+    };
+  } catch (error) {
+    console.error('Gemini API error:', error.message);
+    
+    // Check for rate limit error
+    if (error.status === 429 || error.message?.includes('quota') || error.message?.includes('rate') || error.message?.includes('limit')) {
+      geminiRateLimited = true;
+      geminiRateLimitResetTime = Date.now() + 60000; // 1 minute cooldown
+      throw { isRateLimit: true, provider: 'gemini' };
+    }
+    throw error;
+  }
+};
+
+// ========= AI BUDDY CHAT ENDPOINT =========
+app.post('/api/ai/buddy/chat', authRequired, async (req, res) => {
+  try {
+    const { message } = req.body;
+    
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ success: false, error: 'Message is required' });
+    }
+    
+    // Check word limit
+    const wordCount = countWords(message);
+    if (wordCount > MAX_INPUT_WORDS) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Message too long. Maximum ${MAX_INPUT_WORDS} words allowed. Your message has ${wordCount} words.`,
+        wordLimit: MAX_INPUT_WORDS,
+        wordCount: wordCount
+      });
+    }
+    
+    console.log(`🤖 AI Buddy chat request from user ${req.userId}: ${message.substring(0, 50)}...`);
+    
+    // Try Groq first (text only)
+    try {
+      const groqResponse = await callGroqAPI(message);
+      return res.json(groqResponse);
+    } catch (groqError) {
+      if (groqError.isRateLimit) {
+        console.log('⚠️ Groq rate limited, falling back to Gemini...');
+        
+        // Fallback to Gemini
+        try {
+          const geminiResponse = await callGeminiAPI(message);
+          return res.json(geminiResponse);
+        } catch (geminiError) {
+          if (geminiError.isRateLimit) {
+            // Both services rate limited
+            console.log('❌ Both Groq and Gemini rate limited');
+            return res.status(429).json({
+              success: false,
+              error: 'Service is busy. Please try again after a few moments.',
+              retryAfter: 60
+            });
+          }
+          throw geminiError;
+        }
+      }
+      throw groqError;
+    }
+    
+  } catch (error) {
+    console.error('AI Buddy chat error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to process your request. Please try again.' 
+    });
+  }
+});
+
+// ========= AI BUDDY FILE ANALYSIS ENDPOINT =========
+app.post('/api/ai/buddy/analyze-file', authRequired, cloudUpload.single('file'), async (req, res) => {
+  try {
+    const { message } = req.body;
+    const file = req.file;
+    
+    if (!file) {
+      return res.status(400).json({ success: false, error: 'File is required' });
+    }
+    
+    const userMessage = message || 'Please analyze this file and explain its contents.';
+    
+    // Check word limit for message
+    const wordCount = countWords(userMessage);
+    if (wordCount > MAX_INPUT_WORDS) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Message too long. Maximum ${MAX_INPUT_WORDS} words allowed.`,
+        wordLimit: MAX_INPUT_WORDS
+      });
+    }
+    
+    console.log(`📁 AI Buddy file analysis request from user ${req.userId}: ${file.originalname}`);
+    
+    // Download file from Cloudinary and convert to base64
+    const axios = require('axios');
+    const fileUrl = file.path || file.secure_url;
+    
+    let fileBase64;
+    let mimeType;
+    
+    try {
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+      fileBase64 = Buffer.from(response.data).toString('base64');
+      
+      // Determine MIME type
+      const ext = file.originalname.split('.').pop().toLowerCase();
+      const mimeTypes = {
+        'pdf': 'application/pdf',
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'gif': 'image/gif',
+        'webp': 'image/webp',
+        'txt': 'text/plain',
+        'doc': 'application/msword',
+        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      };
+      mimeType = mimeTypes[ext] || 'application/octet-stream';
+      
+    } catch (downloadError) {
+      console.error('File download error:', downloadError);
+      return res.status(500).json({ success: false, error: 'Failed to process file' });
+    }
+    
+    // Always use Gemini for files (Groq doesn't support files)
+    try {
+      const geminiResponse = await callGeminiAPI(userMessage, {
+        base64: fileBase64,
+        mimeType: mimeType
+      });
+      
+      // Clean up uploaded file from Cloudinary
+      if (file.public_id) {
+        try {
+          await cloudinary.uploader.destroy(file.public_id, { resource_type: 'raw' });
+        } catch (e) { /* ignore cleanup errors */ }
+      }
+      
+      return res.json(geminiResponse);
+      
+    } catch (geminiError) {
+      if (geminiError.isRateLimit) {
+        return res.status(429).json({
+          success: false,
+          error: 'Service is busy. Please try again after a few moments.',
+          retryAfter: 60
+        });
+      }
+      throw geminiError;
+    }
+    
+  } catch (error) {
+    console.error('AI Buddy file analysis error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to analyze file. Please try again.' 
+    });
+  }
+});
+
+// ========= AI BUDDY STATUS ENDPOINT =========
+app.get('/api/ai/buddy/status', authRequired, async (req, res) => {
+  res.json({
+    success: true,
+    status: 'online',
+    wordLimit: MAX_INPUT_WORDS,
+    features: ['chat', 'file_analysis', 'math', 'science']
+  });
+});
+
 // ========= CATCH-ALL ROUTE =========
 app.use('*', (req, res) => {
   res.status(404).json({ 
