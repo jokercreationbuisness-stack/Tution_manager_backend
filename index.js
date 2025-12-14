@@ -374,6 +374,7 @@ const ClassSchema = new Schema({
 });
 
 // Assignment Schema
+// Assignment Schema - CORRECT VERSION
 const AssignmentSchema = new Schema({
   teacherId: { type: Types.ObjectId, ref: 'User', required: true },
   title: { type: String, required: true },
@@ -387,9 +388,11 @@ const AssignmentSchema = new Schema({
   studentId: { type: Types.ObjectId, ref: 'User' },
   attachments: [{
     filename: String,
+    originalName: String,      // ← ADD THIS
     url: String,
     type: String,
     size: Number,
+    cloudinaryId: String,      // ← ADD THIS
     uploadedAt: { type: Date, default: Date.now }
   }],
   maxMarks: { type: Number },
