@@ -206,6 +206,46 @@ const upload = multer({
   }
 });
 
+// ========= LOCATION: Add after existing multer storage config (around line 180) =========
+
+// Separate upload directories to organize files
+const educationUploadDir = path.join(__dirname, 'uploads', 'education');
+if (!fs.existsSync(educationUploadDir)) {
+  fs.mkdirSync(educationUploadDir, { recursive: true });
+}
+
+const educationStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const subDir = req.params.type || 'general'; // assignment, note, exam, submission
+    const targetDir = path.join(educationUploadDir, subDir);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    cb(null, targetDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const ext = path.extname(file.originalname);
+    cb(null, uniqueSuffix + ext);
+  }
+});
+
+const educationUpload = multer({
+  storage: educationStorage,
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB limit for education files
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|rar/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype) || 
+                     file.mimetype.startsWith('image/') ||
+                     file.mimetype.startsWith('application/');
+    if (mimetype || extname) {
+      return cb(null, true);
+    }
+    cb(new Error('Invalid file type. Allowed: images, PDF, Word, Excel, PowerPoint, text, zip'));
+  }
+});
+
 app.use('/uploads', express.static(uploadDir));
 
 // ========= CONFIG =========
@@ -339,6 +379,55 @@ const AssignmentSubmissionSchema = new Schema({
   gradedAt: { type: Date }
 });
 AssignmentSubmissionSchema.index({ assignmentId: 1, studentId: 1 }, { unique: true });
+
+// ========= LOCATION: Add after AssignmentSubmissionSchema =========
+
+// Student Assignment Submission Schema (Enhanced)
+const StudentSubmissionSchema = new Schema({
+  assignmentId: { type: Types.ObjectId, ref: 'Assignment', required: true },
+  studentId: { type: Types.ObjectId, ref: 'User', required: true },
+  content: { type: String }, // Text content/notes
+  attachments: [{
+    filename: String,
+    originalName: String,
+    url: String,
+    type: String, // pdf, image, doc, etc.
+    size: Number,
+    uploadedAt: { type: Date, default: Date.now }
+  }],
+  submittedAt: { type: Date, default: Date.now },
+  status: { type: String, enum: ['SUBMITTED', 'LATE', 'GRADED', 'RETURNED'], default: 'SUBMITTED' },
+  marks: { type: Number },
+  feedback: { type: String },
+  gradedAt: { type: Date },
+  gradedBy: { type: Types.ObjectId, ref: 'User' }
+});
+StudentSubmissionSchema.index({ assignmentId: 1, studentId: 1 }, { unique: true });
+
+// Student Personal Notes Schema (stored locally but synced)
+const StudentPersonalNoteSchema = new Schema({
+  studentId: { type: Types.ObjectId, ref: 'User', required: true },
+  title: { type: String, required: true },
+  content: { type: String }, // Rich text HTML content
+  subject: { type: String },
+  category: { type: String, default: 'PERSONAL' },
+  attachments: [{
+    filename: String,
+    originalName: String,
+    url: String,
+    type: String,
+    size: Number
+  }],
+  isPinned: { type: Boolean, default: false },
+  color: { type: String, default: '#FFFFFF' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+StudentPersonalNoteSchema.index({ studentId: 1, createdAt: -1 });
+
+// ========= ADD MODELS =========
+const StudentSubmission = mongoose.model('StudentSubmission', StudentSubmissionSchema);
+const StudentPersonalNote = mongoose.model('StudentPersonalNote', StudentPersonalNoteSchema);
 
 // Note Schema
 const NoteSchema = new Schema({
@@ -4839,53 +4928,158 @@ app.get('/api/student/group-classes', authRequired, requireRole('STUDENT'), asyn
   }
 });
 
-app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
+// ========= LOCATION: Add new student submission endpoints =========
+
+// Student submits assignment
+app.post('/api/student/assignments/:id/submit', authRequired, requireRole('STUDENT'), educationUpload.array('attachments', 5), async (req, res) => {
   try {
-    const studentId = req.userId;
-    const linkedTeacherIds = await getLinkedTeacherIds(studentId);
+    const assignmentId = req.params.id;
+    const { content } = req.body;
     
-    if (linkedTeacherIds.length === 0) {
-      return res.json({ success: true, assignments: [] });
+    // Check if assignment exists
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
     }
     
-    const assignments = await Assignment.find({
-      teacherId: { $in: linkedTeacherIds },
-      $or: [
-        { scope: 'ALL' },
-        { scope: 'INDIVIDUAL', studentId: studentId }
-      ]
-    })
-    .populate('teacherId', 'name')
-    .sort({ dueAt: 1 })
-    .lean();
+    // Check if already submitted
+    const existing = await StudentSubmission.findOne({ 
+      assignmentId, 
+      studentId: req.userId 
+    });
     
-    const assignmentsWithStatus = await Promise.all(
-      assignments.map(async (assignment) => {
-        const submission = await AssignmentSubmission.findOne({
-          assignmentId: assignment._id,
-          studentId: studentId
+    if (existing) {
+      return res.status(400).json({ error: 'Assignment already submitted' });
+    }
+    
+    // Process uploaded files
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/submission/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size,
+          uploadedAt: new Date()
         });
+      }
+    }
+    
+    // Check if late submission
+    const isLate = new Date() > new Date(assignment.dueAt);
+    
+    const submission = await StudentSubmission.create({
+      assignmentId,
+      studentId: req.userId,
+      content,
+      attachments,
+      status: isLate ? 'LATE' : 'SUBMITTED'
+    });
+    
+    // Update assignment submission count
+    await Assignment.findByIdAndUpdate(assignmentId, { 
+      $inc: { submissionCount: 1 } 
+    });
+    
+    console.log(`✅ Assignment submitted by student ${req.userId}`);
+    
+    res.status(201).json({
+      success: true,
+      submission: {
+        id: submission._id.toString(),
+        status: submission.status,
+        submittedAt: submission.submittedAt,
+        attachments: submission.attachments
+      }
+    });
+  } catch (error) {
+    console.error('Submit assignment error:', error);
+    res.status(500).json({ error: 'Failed to submit assignment' });
+  }
+});
 
-        return {
-          id: assignment._id.toString(),
-          title: assignment.title,
-          description: assignment.description,
-          dueAt: assignment.dueAt,
-          priority: assignment.priority,
-          status: assignment.status,
-          teacherName: assignment.teacherId.name,
-          submissionStatus: submission ? submission.status : 'NOT_SUBMITTED',
-          submittedAt: submission?.submittedAt,
-          marks: submission?.marks,
-          attachments: assignment.attachments || []
-        };
-      })
+// Get student's submission for an assignment
+app.get('/api/student/assignments/:id/submission', authRequired, async (req, res) => {
+  try {
+    const submission = await StudentSubmission.findOne({
+      assignmentId: req.params.id,
+      studentId: req.userId
+    }).lean();
+    
+    if (!submission) {
+      return res.json({ success: true, submitted: false });
+    }
+    
+    res.json({
+      success: true,
+      submitted: true,
+      submission: {
+        id: submission._id.toString(),
+        content: submission.content,
+        attachments: submission.attachments,
+        status: submission.status,
+        submittedAt: submission.submittedAt,
+        marks: submission.marks,
+        feedback: submission.feedback
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch submission' });
+  }
+});
+
+// Teacher views submissions for an assignment
+app.get('/api/teacher/assignments/:id/submissions', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const submissions = await StudentSubmission.find({ assignmentId: req.params.id })
+      .populate('studentId', 'name email studentCode avatar')
+      .sort({ submittedAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      submissions: submissions.map(s => ({
+        id: s._id.toString(),
+        student: s.studentId,
+        content: s.content,
+        attachments: s.attachments,
+        status: s.status,
+        submittedAt: s.submittedAt,
+        marks: s.marks,
+        feedback: s.feedback
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch submissions' });
+  }
+});
+
+// Teacher grades a submission
+app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { marks, feedback } = req.body;
+    
+    const submission = await StudentSubmission.findByIdAndUpdate(
+      req.params.id,
+      {
+        marks,
+        feedback,
+        status: 'GRADED',
+        gradedAt: new Date(),
+        gradedBy: req.userId
+      },
+      { new: true }
     );
     
-    res.json({ success: true, assignments: assignmentsWithStatus });
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+    
+    res.json({ success: true, submission });
   } catch (error) {
-    console.error('Student assignments error:', error);
-    res.status(500).json({ error: 'Failed to fetch assignments' });
+    res.status(500).json({ error: 'Failed to grade submission' });
   }
 });
 
@@ -4924,6 +5118,151 @@ app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, 
   } catch (error) {
     console.error('Student notes error:', error);
     res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// ========= LOCATION: Add student personal notes endpoints =========
+
+// Create personal note
+app.post('/api/student/notes', authRequired, requireRole('STUDENT'), educationUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const { title, content, subject, category, isPinned, color } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/student-note/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size
+        });
+      }
+    }
+    
+    const note = await StudentPersonalNote.create({
+      studentId: req.userId,
+      title,
+      content,
+      subject,
+      category: category || 'PERSONAL',
+      isPinned: isPinned === 'true' || isPinned === true,
+      color: color || '#FFFFFF',
+      attachments
+    });
+    
+    res.status(201).json({
+      success: true,
+      note: {
+        id: note._id.toString(),
+        title: note.title,
+        attachments: note.attachments
+      }
+    });
+  } catch (error) {
+    console.error('Create personal note error:', error);
+    res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
+// Get all personal notes
+app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const notes = await StudentPersonalNote.find({ studentId: req.userId })
+      .sort({ isPinned: -1, updatedAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      notes: notes.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        content: n.content,
+        subject: n.subject,
+        category: n.category,
+        isPinned: n.isPinned,
+        color: n.color,
+        attachments: n.attachments,
+        createdAt: n.createdAt,
+        updatedAt: n.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// Update personal note
+app.put('/api/student/notes/:id', authRequired, requireRole('STUDENT'), educationUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const { title, content, subject, category, isPinned, color } = req.body;
+    
+    const note = await StudentPersonalNote.findOne({
+      _id: req.params.id,
+      studentId: req.userId
+    });
+    
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    // Add new attachments
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        note.attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/student-note/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size
+        });
+      }
+    }
+    
+    note.title = title || note.title;
+    note.content = content !== undefined ? content : note.content;
+    note.subject = subject || note.subject;
+    note.category = category || note.category;
+    note.isPinned = isPinned !== undefined ? (isPinned === 'true' || isPinned === true) : note.isPinned;
+    note.color = color || note.color;
+    note.updatedAt = new Date();
+    
+    await note.save();
+    
+    res.json({ success: true, note });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update note' });
+  }
+});
+
+// Delete personal note
+app.delete('/api/student/notes/:id', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const note = await StudentPersonalNote.findOneAndDelete({
+      _id: req.params.id,
+      studentId: req.userId
+    });
+    
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    // Delete associated files
+    for (const att of note.attachments || []) {
+      const filePath = path.join(__dirname, att.url);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    res.json({ success: true, message: 'Note deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete note' });
   }
 });
 
@@ -5409,80 +5748,91 @@ app.get('/api/teacher/classes', authRequired, requireRole('TEACHER'), async (req
 });
 
 // ========= ASSIGNMENT MANAGEMENT =========
-app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
+// ========= LOCATION: Replace existing POST /api/teacher/assignments =========
+
+// Create assignment with file attachments
+app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), educationUpload.array('attachments', 10), async (req, res) => {
   try {
-    const assignments = await Assignment.find({ teacherId: req.userId })
-      .sort({ dueAt: 1 })
-      .lean();
-
-    const formattedAssignments = assignments.map(assignment => ({
-      id: assignment._id.toString(),
-      title: assignment.title,
-      dueAt: assignment.dueAt ? assignment.dueAt.toISOString() : null,
-      description: assignment.description,
-      notes: assignment.notes,
-      priority: assignment.priority
-    }));
-
-    res.json({ success: true, assignments: formattedAssignments });
-  } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to fetch assignments' });
-  }
-});
-
-app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const { title, description, dueAt, classId, notes, priority, scope, studentId, maxMarks, attachments } = req.body;
-
+    const { title, description, dueAt, subject, classId, notes, priority, maxMarks, scope, sectionId, studentId } = req.body;
+    
     if (!title || !dueAt) {
       return res.status(400).json({ error: 'Title and due date are required' });
     }
-
-    if (scope === 'INDIVIDUAL' && studentId) {
-      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not authorized to create assignment for this student' });
+    
+    // Process uploaded files
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/assignment/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size,
+          uploadedAt: new Date()
+        });
       }
     }
-
+    
     const assignment = await Assignment.create({
       teacherId: req.userId,
       title,
-      description: description || '',
+      description: description || notes,
       dueAt: new Date(dueAt),
-      classId: classId || null,
-      notes: notes || '',
+      classId,
+      notes,
       priority: priority || 1,
+      maxMarks,
       scope: scope || 'ALL',
-      studentId: scope === 'INDIVIDUAL' ? studentId : null,
-      maxMarks: maxMarks || null,
-      attachments: attachments || []
+      sectionId,
+      studentId,
+      attachments
     });
-
-    if (scope === 'ALL') {
-      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
-      for (const link of links) {
-        await createNotification(
-          link.studentId,
-          'ASSIGNMENT',
-          'New Assignment',
-          `New assignment: ${title}`,
-          { assignmentId: assignment._id }
-        );
+    
+    console.log(`📝 Assignment created: ${title} with ${attachments.length} attachments`);
+    
+    res.status(201).json({ 
+      success: true, 
+      assignment: {
+        id: assignment._id.toString(),
+        title: assignment.title,
+        attachments: assignment.attachments
       }
-    } else if (scope === 'INDIVIDUAL' && studentId) {
-      await createNotification(
-        studentId,
-        'ASSIGNMENT',
-        'New Individual Assignment',
-        `New individual assignment: ${title}`,
-        { assignmentId: assignment._id }
-      );
-    }
-
-    res.status(201).json({ success: true, assignmentId: assignment._id });
+    });
   } catch (error) {
+    console.error('Create assignment error:', error);
     res.status(500).json({ error: 'Failed to create assignment' });
+  }
+});
+
+// Get assignment details with attachments
+app.get('/api/teacher/assignments/:id', authRequired, async (req, res) => {
+  try {
+    const assignment = await Assignment.findById(req.params.id)
+      .populate('teacherId', 'name avatar')
+      .lean();
+    
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    res.json({
+      success: true,
+      assignment: {
+        id: assignment._id.toString(),
+        title: assignment.title,
+        description: assignment.description,
+        dueAt: assignment.dueAt,
+        notes: assignment.notes,
+        priority: assignment.priority,
+        maxMarks: assignment.maxMarks,
+        attachments: assignment.attachments || [],
+        teacher: assignment.teacherId,
+        createdAt: assignment.createdAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch assignment' });
   }
 });
 
@@ -5612,74 +5962,87 @@ app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER
 });
 
 // ========= NOTE MANAGEMENT =========
-app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
+// ========= LOCATION: Replace existing POST /api/teacher/notes =========
+
+// Create note with file attachments
+app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), educationUpload.array('attachments', 10), async (req, res) => {
   try {
-    const notes = await Note.find({ teacherId: req.userId })
-      .sort({ createdAt: -1 })
-      .lean();
-
-    const formattedNotes = notes.map(note => ({
-      id: note._id.toString(),
-      title: note.title,
-      content: note.content,
-      subject: note.subject
-    }));
-
-    res.json({ success: true, notes: formattedNotes });
-  } catch (error) {
-    res.status(500).json({ success: false, error: 'Failed to fetch notes' });
-  }
-});
-
-app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
-  try {
-    const { title, content, subject, scope, studentId, attachments } = req.body;
-
+    const { title, content, subject, category, scope, sectionId, studentId, isPinned } = req.body;
+    
     if (!title) {
       return res.status(400).json({ error: 'Title is required' });
     }
-
-    if (scope === 'INDIVIDUAL' && studentId) {
-      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not authorized to create note for this student' });
+    
+    // Process uploaded files
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/note/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size
+        });
       }
     }
-
+    
     const note = await Note.create({
       teacherId: req.userId,
       title,
-      content: content || '',
-      subject: subject || '',
+      content, // Can be rich text HTML
+      subject,
+      category: category || 'GENERAL',
       scope: scope || 'ALL',
-      studentId: scope === 'INDIVIDUAL' ? studentId : null,
-      attachments: attachments || []
+      sectionId,
+      studentId,
+      isPinned: isPinned === 'true' || isPinned === true,
+      attachments
     });
-
-    if (scope === 'ALL') {
-      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
-      for (const link of links) {
-        await createNotification(
-          link.studentId,
-          'CLASS',
-          'New Note Added',
-          `New note: ${title}`,
-          { noteId: note._id }
-        );
+    
+    console.log(`📒 Note created: ${title} with ${attachments.length} attachments`);
+    
+    res.status(201).json({ 
+      success: true, 
+      note: {
+        id: note._id.toString(),
+        title: note.title,
+        attachments: note.attachments
       }
-    } else if (scope === 'INDIVIDUAL' && studentId) {
-      await createNotification(
-        studentId,
-        'CLASS',
-        'New Note Added',
-        `New note: ${title}`,
-        { noteId: note._id }
-      );
-    }
-
-    res.status(201).json({ success: true, noteId: note._id });
+    });
   } catch (error) {
+    console.error('Create note error:', error);
     res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
+// Get note details
+app.get('/api/teacher/notes/:id', authRequired, async (req, res) => {
+  try {
+    const note = await Note.findById(req.params.id)
+      .populate('teacherId', 'name avatar')
+      .lean();
+    
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    res.json({
+      success: true,
+      note: {
+        id: note._id.toString(),
+        title: note.title,
+        content: note.content,
+        subject: note.subject,
+        category: note.category,
+        attachments: note.attachments || [],
+        isPinned: note.isPinned,
+        teacher: note.teacherId,
+        createdAt: note.createdAt
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch note' });
   }
 });
 
@@ -5750,58 +6113,59 @@ app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, 
   }
 });
 
-app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
+// ========= LOCATION: Replace existing POST /api/teacher/exams =========
+
+// Create exam with file attachments
+app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'), educationUpload.array('attachments', 10), async (req, res) => {
   try {
-    const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, studentId } = req.body;
-
+    const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, sectionId, studentId } = req.body;
+    
     if (!title || !whenAt || !maxMarks) {
-      return res.status(400).json({ error: 'Title, date, and max marks are required' });
+      return res.status(400).json({ error: 'Title, date and max marks are required' });
     }
-
-    if (scope === 'INDIVIDUAL' && studentId) {
-      const isLinked = await ensureTeacherOwnsStudent(req.userId, studentId);
-      if (!isLinked) {
-        return res.status(403).json({ error: 'Not authorized to create exam for this student' });
+    
+    // Process uploaded files
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename,
+          originalName: file.originalname,
+          url: `/uploads/education/exam/${file.filename}`,
+          type: path.extname(file.originalname).toLowerCase().replace('.', ''),
+          size: file.size
+        });
       }
     }
-
+    
     const exam = await Exam.create({
       teacherId: req.userId,
       title,
-      description: description || '',
+      description,
       whenAt: new Date(whenAt),
-      classId: classId || null,
-      location: location || '',
-      notes: notes || '',
-      maxMarks,
-      duration: duration || 60,
+      classId,
+      location,
+      notes,
+      maxMarks: parseInt(maxMarks),
+      duration: duration ? parseInt(duration) : 60,
       scope: scope || 'ALL',
-      studentId: scope === 'INDIVIDUAL' ? studentId : null
+      sectionId,
+      studentId,
+      attachments
     });
-
-    if (scope === 'ALL') {
-      const links = await TeacherStudentLink.find({ teacherId: req.userId, isActive: true });
-      for (const link of links) {
-        await createNotification(
-          link.studentId,
-          'EXAM',
-          'New Exam Scheduled',
-          `New exam: ${title}`,
-          { examId: exam._id }
-        );
+    
+    console.log(`📋 Exam created: ${title} with ${attachments.length} attachments`);
+    
+    res.status(201).json({ 
+      success: true, 
+      exam: {
+        id: exam._id.toString(),
+        title: exam.title,
+        attachments: exam.attachments
       }
-    } else if (scope === 'INDIVIDUAL' && studentId) {
-      await createNotification(
-        studentId,
-        'EXAM',
-        'New Individual Exam',
-        `New individual exam: ${title}`,
-        { examId: exam._id }
-      );
-    }
-
-    res.status(201).json({ success: true, examId: exam._id });
+    });
   } catch (error) {
+    console.error('Create exam error:', error);
     res.status(500).json({ error: 'Failed to create exam' });
   }
 });
@@ -11489,6 +11853,60 @@ app.post('/api/admin/setup/initial', async (req, res) => {
   } catch (error) {
     console.error('Initial setup error:', error);
     res.status(500).json({ error: 'Setup failed' });
+  }
+});
+
+// ========= LOCATION: Add utility endpoint for file cleanup =========
+
+// Cleanup old unused files (run periodically)
+app.post('/api/admin/cleanup-files', authRequired, async (req, res) => {
+  try {
+    // Only allow admins
+    const admin = await AdminUser.findOne({ email: req.userId });
+    if (!admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const educationDir = path.join(__dirname, 'uploads', 'education');
+    let deletedCount = 0;
+    
+    // Get all file URLs from database
+    const allAttachments = new Set();
+    
+    const assignments = await Assignment.find({}).select('attachments');
+    const notes = await Note.find({}).select('attachments');
+    const exams = await Exam.find({}).select('attachments');
+    const submissions = await StudentSubmission.find({}).select('attachments');
+    const personalNotes = await StudentPersonalNote.find({}).select('attachments');
+    
+    [assignments, notes, exams, submissions, personalNotes].forEach(docs => {
+      docs.forEach(doc => {
+        (doc.attachments || []).forEach(att => {
+          if (att.filename) allAttachments.add(att.filename);
+        });
+      });
+    });
+    
+    // Walk through directories and delete orphaned files
+    const subdirs = ['assignment', 'note', 'exam', 'submission', 'student-note'];
+    for (const subdir of subdirs) {
+      const dirPath = path.join(educationDir, subdir);
+      if (fs.existsSync(dirPath)) {
+        const files = fs.readdirSync(dirPath);
+        for (const file of files) {
+          if (!allAttachments.has(file)) {
+            fs.unlinkSync(path.join(dirPath, file));
+            deletedCount++;
+          }
+        }
+      }
+    }
+    
+    console.log(`🧹 Cleaned up ${deletedCount} orphaned files`);
+    res.json({ success: true, deletedCount });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: 'Cleanup failed' });
   }
 });
 
