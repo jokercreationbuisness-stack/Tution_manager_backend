@@ -16,6 +16,43 @@ const fs = require('fs');
 // Add this after your existing requires
 const crypto = require('crypto');
 
+// ========= CLOUDINARY SETUP (FREE 25GB PERSISTENT STORAGE) =========
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Cloudinary storage for education files
+const educationCloudStorage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: async (req, file) => {
+    const folder = `tuition_manager/${req.params.type || 'general'}`;
+    const ext = file.originalname.split('.').pop().toLowerCase();
+    let resourceType = 'auto';
+    
+    if (['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'zip', 'rar'].includes(ext)) {
+      resourceType = 'raw';
+    }
+    
+    return {
+      folder: folder,
+      resource_type: resourceType,
+      public_id: `${Date.now()}-${file.originalname.replace(/\.[^/.]+$/, '')}`,
+      allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'zip', 'rar']
+    };
+  }
+});
+
+const cloudUpload = multer({ 
+  storage: educationCloudStorage,
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
+
 // ========= ADD AFTER LINE 18 =========
 // Google OAuth & OTP Dependencies
 const { OAuth2Client } = require('google-auth-library');
@@ -14135,6 +14172,913 @@ app.get('/api/student/code', authRequired, async (req, res) => {
   } catch (error) {
     console.error('Get student code error:', error);
     res.status(500).json({ error: 'Failed to get student code' });
+  }
+});
+
+// ========================================
+// ========= TEACHER ASSIGNMENT APIs =========
+// ========================================
+
+// List all assignments for teacher
+app.get('/api/teacher/assignments', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignments = await Assignment.find({ teacherId: req.userId })
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    const formattedAssignments = assignments.map(a => ({
+      id: a._id.toString(),
+      title: a.title,
+      description: a.description,
+      dueAt: a.dueAt,
+      notes: a.notes,
+      priority: a.priority,
+      status: a.status,
+      maxMarks: a.maxMarks,
+      submissionCount: a.submissionCount || 0,
+      attachments: a.attachments || [],
+      createdAt: a.createdAt
+    }));
+    
+    console.log(`📋 Teacher ${req.userId} fetched ${formattedAssignments.length} assignments`);
+    
+    res.json({ success: true, assignments: formattedAssignments });
+  } catch (error) {
+    console.error('List assignments error:', error);
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+// Get single assignment details
+app.get('/api/teacher/assignments/:id', authRequired, async (req, res) => {
+  try {
+    const assignment = await Assignment.findById(req.params.id)
+      .populate('teacherId', 'name avatar')
+      .lean();
+    
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    res.json({
+      success: true,
+      assignment: {
+        id: assignment._id.toString(),
+        title: assignment.title,
+        description: assignment.description,
+        dueAt: assignment.dueAt,
+        notes: assignment.notes,
+        priority: assignment.priority,
+        maxMarks: assignment.maxMarks,
+        attachments: (assignment.attachments || []).map(att => ({
+          ...att,
+          downloadUrl: att.url
+        })),
+        teacher: assignment.teacherId,
+        createdAt: assignment.createdAt
+      }
+    });
+  } catch (error) {
+    console.error('Get assignment error:', error);
+    res.status(500).json({ error: 'Failed to fetch assignment' });
+  }
+});
+
+// Create assignment with file attachments (Cloudinary)
+app.post('/api/teacher/assignments', authRequired, requireRole('TEACHER'), 
+  cloudUpload.array('attachments', 10), async (req, res) => {
+  try {
+    const { title, description, dueAt, classId, notes, priority, maxMarks, scope, sectionId, studentId } = req.body;
+    
+    if (!title || !dueAt) {
+      return res.status(400).json({ error: 'Title and due date are required' });
+    }
+    
+    // Process Cloudinary uploaded files
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id,
+          uploadedAt: new Date()
+        });
+      }
+    }
+    
+    const assignment = await Assignment.create({
+      teacherId: req.userId,
+      title,
+      description: description || notes,
+      dueAt: new Date(dueAt),
+      classId,
+      notes,
+      priority: parseInt(priority) || 1,
+      maxMarks: maxMarks ? parseInt(maxMarks) : null,
+      scope: scope || 'ALL',
+      sectionId,
+      studentId,
+      attachments
+    });
+    
+    console.log(`📝 Assignment created: ${title} with ${attachments.length} files`);
+    
+    res.status(201).json({ 
+      success: true, 
+      assignment: {
+        id: assignment._id.toString(),
+        title: assignment.title,
+        attachments: assignment.attachments
+      }
+    });
+  } catch (error) {
+    console.error('Create assignment error:', error);
+    res.status(500).json({ error: 'Failed to create assignment' });
+  }
+});
+
+// Update assignment
+app.put('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'),
+  cloudUpload.array('attachments', 10), async (req, res) => {
+  try {
+    const { title, description, dueAt, notes, priority, maxMarks } = req.body;
+    
+    const assignment = await Assignment.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    // Process new attachments
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        assignment.attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id,
+          uploadedAt: new Date()
+        });
+      }
+    }
+    
+    if (title) assignment.title = title;
+    if (description) assignment.description = description;
+    if (dueAt) assignment.dueAt = new Date(dueAt);
+    if (notes) assignment.notes = notes;
+    if (priority !== undefined) assignment.priority = parseInt(priority);
+    if (maxMarks) assignment.maxMarks = parseInt(maxMarks);
+    assignment.updatedAt = new Date();
+    
+    await assignment.save();
+    
+    res.json({ success: true, assignment: { id: assignment._id.toString(), title: assignment.title } });
+  } catch (error) {
+    console.error('Update assignment error:', error);
+    res.status(500).json({ error: 'Failed to update assignment' });
+  }
+});
+
+// Delete assignment
+app.delete('/api/teacher/assignments/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignment = await Assignment.findOneAndDelete({ _id: req.params.id, teacherId: req.userId });
+    
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    // Delete files from Cloudinary
+    for (const att of assignment.attachments || []) {
+      if (att.cloudinaryId) {
+        try {
+          const ext = att.type?.toLowerCase();
+          const resourceType = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'zip'].includes(ext) ? 'raw' : 'image';
+          await cloudinary.uploader.destroy(att.cloudinaryId, { resource_type: resourceType });
+        } catch (e) {
+          console.error('Cloudinary delete error:', e);
+        }
+      }
+    }
+    
+    // Delete all submissions for this assignment
+    await StudentSubmission.deleteMany({ assignmentId: req.params.id });
+    
+    res.json({ success: true, message: 'Assignment deleted' });
+  } catch (error) {
+    console.error('Delete assignment error:', error);
+    res.status(500).json({ error: 'Failed to delete assignment' });
+  }
+});
+
+// Get submissions for an assignment (Teacher view)
+app.get('/api/teacher/assignments/:id/submissions', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const assignment = await Assignment.findOne({ _id: req.params.id, teacherId: req.userId });
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    const submissions = await StudentSubmission.find({ assignmentId: req.params.id })
+      .populate('studentId', 'name email avatar studentCode')
+      .sort({ submittedAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      assignment: { id: assignment._id.toString(), title: assignment.title, maxMarks: assignment.maxMarks },
+      submissions: submissions.map(s => ({
+        id: s._id.toString(),
+        student: s.studentId ? {
+          id: s.studentId._id.toString(),
+          name: s.studentId.name,
+          email: s.studentId.email,
+          avatar: s.studentId.avatar,
+          studentCode: s.studentId.studentCode
+        } : null,
+        content: s.content,
+        attachments: s.attachments,
+        submittedAt: s.submittedAt,
+        status: s.status,
+        marks: s.marks,
+        feedback: s.feedback
+      }))
+    });
+  } catch (error) {
+    console.error('Get submissions error:', error);
+    res.status(500).json({ error: 'Failed to fetch submissions' });
+  }
+});
+
+// Grade a submission (Teacher)
+app.put('/api/teacher/submissions/:id/grade', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const { marks, feedback } = req.body;
+    
+    const submission = await StudentSubmission.findById(req.params.id)
+      .populate('assignmentId');
+    
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+    
+    // Verify teacher owns the assignment
+    if (submission.assignmentId.teacherId.toString() !== req.userId) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    submission.marks = marks !== undefined ? parseInt(marks) : submission.marks;
+    submission.feedback = feedback || submission.feedback;
+    submission.status = 'GRADED';
+    submission.gradedAt = new Date();
+    submission.gradedBy = req.userId;
+    await submission.save();
+    
+    res.json({ success: true, message: 'Submission graded' });
+  } catch (error) {
+    console.error('Grade submission error:', error);
+    res.status(500).json({ error: 'Failed to grade submission' });
+  }
+});
+
+// ========================================
+// ========= TEACHER NOTES APIs =========
+// ========================================
+
+app.get('/api/teacher/notes', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const notes = await Note.find({ teacherId: req.userId })
+      .sort({ isPinned: -1, createdAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      notes: notes.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        content: n.content,
+        subject: n.subject,
+        category: n.category,
+        isPinned: n.isPinned,
+        attachments: n.attachments || [],
+        createdAt: n.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('List notes error:', error);
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+app.post('/api/teacher/notes', authRequired, requireRole('TEACHER'),
+  cloudUpload.array('attachments', 10), async (req, res) => {
+  try {
+    const { title, content, subject, category, scope, sectionId, studentId, isPinned } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id
+        });
+      }
+    }
+    
+    const note = await Note.create({
+      teacherId: req.userId,
+      title,
+      content,
+      subject,
+      category: category || 'GENERAL',
+      scope: scope || 'ALL',
+      sectionId,
+      studentId,
+      isPinned: isPinned === 'true' || isPinned === true,
+      attachments
+    });
+    
+    res.status(201).json({ success: true, note: { id: note._id.toString(), title: note.title } });
+  } catch (error) {
+    console.error('Create note error:', error);
+    res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
+app.delete('/api/teacher/notes/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const note = await Note.findOneAndDelete({ _id: req.params.id, teacherId: req.userId });
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    // Delete Cloudinary files
+    for (const att of note.attachments || []) {
+      if (att.cloudinaryId) {
+        try {
+          await cloudinary.uploader.destroy(att.cloudinaryId, { resource_type: 'raw' });
+        } catch (e) {}
+      }
+    }
+    
+    res.json({ success: true, message: 'Note deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete note' });
+  }
+});
+
+// ========================================
+// ========= TEACHER EXAMS APIs =========
+// ========================================
+
+app.get('/api/teacher/exams', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const exams = await Exam.find({ teacherId: req.userId })
+      .sort({ whenAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      exams: exams.map(e => ({
+        id: e._id.toString(),
+        title: e.title,
+        description: e.description,
+        whenAt: e.whenAt,
+        location: e.location,
+        maxMarks: e.maxMarks,
+        duration: e.duration,
+        attachments: e.attachments || [],
+        createdAt: e.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch exams' });
+  }
+});
+
+app.post('/api/teacher/exams', authRequired, requireRole('TEACHER'),
+  cloudUpload.array('attachments', 10), async (req, res) => {
+  try {
+    const { title, description, whenAt, classId, location, notes, maxMarks, duration, scope, sectionId, studentId } = req.body;
+    
+    if (!title || !whenAt || !maxMarks) {
+      return res.status(400).json({ error: 'Title, date and max marks required' });
+    }
+    
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id
+        });
+      }
+    }
+    
+    const exam = await Exam.create({
+      teacherId: req.userId,
+      title,
+      description,
+      whenAt: new Date(whenAt),
+      classId,
+      location,
+      notes,
+      maxMarks: parseInt(maxMarks),
+      duration: duration ? parseInt(duration) : 60,
+      scope: scope || 'ALL',
+      sectionId,
+      studentId,
+      attachments
+    });
+    
+    res.status(201).json({ success: true, exam: { id: exam._id.toString(), title: exam.title } });
+  } catch (error) {
+    console.error('Create exam error:', error);
+    res.status(500).json({ error: 'Failed to create exam' });
+  }
+});
+
+app.delete('/api/teacher/exams/:id', authRequired, requireRole('TEACHER'), async (req, res) => {
+  try {
+    const exam = await Exam.findOneAndDelete({ _id: req.params.id, teacherId: req.userId });
+    if (!exam) {
+      return res.status(404).json({ error: 'Exam not found' });
+    }
+    res.json({ success: true, message: 'Exam deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete exam' });
+  }
+});
+
+// ========================================
+// ========= STUDENT ASSIGNMENT APIs =========
+// ========================================
+
+// Get assignments for student (from linked teachers)
+app.get('/api/student/assignments', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    // Get linked teachers
+    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
+    const teacherIds = links.map(l => l.teacherId);
+    
+    // Get assignments from linked teachers (scope ALL or specifically for this student)
+    const assignments = await Assignment.find({
+      teacherId: { $in: teacherIds },
+      $or: [
+        { scope: 'ALL' },
+        { scope: 'INDIVIDUAL', studentId: req.userId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .sort({ dueAt: 1 })
+    .lean();
+    
+    // Get submission status for each
+    const assignmentIds = assignments.map(a => a._id);
+    const submissions = await StudentSubmission.find({
+      assignmentId: { $in: assignmentIds },
+      studentId: req.userId
+    }).lean();
+    
+    const submissionMap = {};
+    submissions.forEach(s => {
+      submissionMap[s.assignmentId.toString()] = s;
+    });
+    
+    res.json({
+      success: true,
+      assignments: assignments.map(a => ({
+        id: a._id.toString(),
+        title: a.title,
+        description: a.description,
+        dueAt: a.dueAt,
+        notes: a.notes,
+        priority: a.priority,
+        maxMarks: a.maxMarks,
+        attachments: a.attachments || [],
+        teacher: a.teacherId ? { name: a.teacherId.name, avatar: a.teacherId.avatar } : null,
+        submission: submissionMap[a._id.toString()] ? {
+          id: submissionMap[a._id.toString()]._id.toString(),
+          status: submissionMap[a._id.toString()].status,
+          submittedAt: submissionMap[a._id.toString()].submittedAt,
+          marks: submissionMap[a._id.toString()].marks,
+          feedback: submissionMap[a._id.toString()].feedback
+        } : null,
+        isSubmitted: !!submissionMap[a._id.toString()]
+      }))
+    });
+  } catch (error) {
+    console.error('Get student assignments error:', error);
+    res.status(500).json({ error: 'Failed to fetch assignments' });
+  }
+});
+
+// Get single assignment details (Student)
+app.get('/api/student/assignments/:id', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const assignment = await Assignment.findById(req.params.id)
+      .populate('teacherId', 'name avatar')
+      .lean();
+    
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    // Check if student has submission
+    const submission = await StudentSubmission.findOne({
+      assignmentId: req.params.id,
+      studentId: req.userId
+    }).lean();
+    
+    res.json({
+      success: true,
+      assignment: {
+        id: assignment._id.toString(),
+        title: assignment.title,
+        description: assignment.description,
+        dueAt: assignment.dueAt,
+        notes: assignment.notes,
+        priority: assignment.priority,
+        maxMarks: assignment.maxMarks,
+        attachments: assignment.attachments || [],
+        teacher: assignment.teacherId
+      },
+      submission: submission ? {
+        id: submission._id.toString(),
+        content: submission.content,
+        attachments: submission.attachments,
+        submittedAt: submission.submittedAt,
+        status: submission.status,
+        marks: submission.marks,
+        feedback: submission.feedback
+      } : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch assignment' });
+  }
+});
+
+// Submit assignment (Student)
+app.post('/api/student/assignments/:id/submit', authRequired, requireRole('STUDENT'),
+  cloudUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const assignmentId = req.params.id;
+    const { content } = req.body;
+    
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    // Check if already submitted
+    const existing = await StudentSubmission.findOne({ assignmentId, studentId: req.userId });
+    if (existing) {
+      return res.status(400).json({ error: 'Already submitted. You can update your submission.' });
+    }
+    
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id,
+          uploadedAt: new Date()
+        });
+      }
+    }
+    
+    const isLate = new Date() > new Date(assignment.dueAt);
+    
+    const submission = await StudentSubmission.create({
+      assignmentId,
+      studentId: req.userId,
+      content,
+      attachments,
+      status: isLate ? 'LATE' : 'SUBMITTED'
+    });
+    
+    // Update submission count
+    await Assignment.findByIdAndUpdate(assignmentId, { $inc: { submissionCount: 1 } });
+    
+    console.log(`✅ Student ${req.userId} submitted assignment: ${assignment.title}`);
+    
+    res.status(201).json({
+      success: true,
+      submission: {
+        id: submission._id.toString(),
+        status: submission.status,
+        submittedAt: submission.submittedAt,
+        isLate
+      }
+    });
+  } catch (error) {
+    console.error('Submit assignment error:', error);
+    res.status(500).json({ error: 'Failed to submit assignment' });
+  }
+});
+
+// Update submission (Student - before graded)
+app.put('/api/student/assignments/:id/submit', authRequired, requireRole('STUDENT'),
+  cloudUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const { content } = req.body;
+    
+    const submission = await StudentSubmission.findOne({
+      assignmentId: req.params.id,
+      studentId: req.userId
+    });
+    
+    if (!submission) {
+      return res.status(404).json({ error: 'No submission found' });
+    }
+    
+    if (submission.status === 'GRADED') {
+      return res.status(400).json({ error: 'Cannot update graded submission' });
+    }
+    
+    if (content) submission.content = content;
+    
+    // Add new attachments
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        submission.attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id,
+          uploadedAt: new Date()
+        });
+      }
+    }
+    
+    await submission.save();
+    
+    res.json({ success: true, message: 'Submission updated' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update submission' });
+  }
+});
+
+// Get my submission for an assignment
+app.get('/api/student/assignments/:id/submission', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const submission = await StudentSubmission.findOne({
+      assignmentId: req.params.id,
+      studentId: req.userId
+    }).lean();
+    
+    if (!submission) {
+      return res.json({ success: true, submitted: false });
+    }
+    
+    res.json({
+      success: true,
+      submitted: true,
+      submission: {
+        id: submission._id.toString(),
+        content: submission.content,
+        attachments: submission.attachments,
+        status: submission.status,
+        submittedAt: submission.submittedAt,
+        marks: submission.marks,
+        feedback: submission.feedback
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch submission' });
+  }
+});
+
+// ========================================
+// ========= STUDENT NOTES/EXAMS APIs =========
+// ========================================
+
+// Get notes from linked teachers
+app.get('/api/student/notes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
+    const teacherIds = links.map(l => l.teacherId);
+    
+    const notes = await Note.find({
+      teacherId: { $in: teacherIds },
+      $or: [
+        { scope: 'ALL' },
+        { scope: 'INDIVIDUAL', studentId: req.userId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .sort({ isPinned: -1, createdAt: -1 })
+    .lean();
+    
+    res.json({
+      success: true,
+      notes: notes.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        content: n.content,
+        subject: n.subject,
+        category: n.category,
+        isPinned: n.isPinned,
+        attachments: n.attachments || [],
+        teacher: n.teacherId ? { name: n.teacherId.name, avatar: n.teacherId.avatar } : null,
+        createdAt: n.createdAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// Get exams from linked teachers
+app.get('/api/student/exams', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const links = await TeacherStudentLink.find({ studentId: req.userId, isActive: true });
+    const teacherIds = links.map(l => l.teacherId);
+    
+    const exams = await Exam.find({
+      teacherId: { $in: teacherIds },
+      $or: [
+        { scope: 'ALL' },
+        { scope: 'INDIVIDUAL', studentId: req.userId }
+      ]
+    })
+    .populate('teacherId', 'name avatar')
+    .sort({ whenAt: 1 })
+    .lean();
+    
+    res.json({
+      success: true,
+      exams: exams.map(e => ({
+        id: e._id.toString(),
+        title: e.title,
+        description: e.description,
+        whenAt: e.whenAt,
+        location: e.location,
+        maxMarks: e.maxMarks,
+        duration: e.duration,
+        attachments: e.attachments || [],
+        teacher: e.teacherId ? { name: e.teacherId.name, avatar: e.teacherId.avatar } : null
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch exams' });
+  }
+});
+
+// ========================================
+// ========= STUDENT PERSONAL NOTES =========
+// ========================================
+
+// Get personal notes
+app.get('/api/student/personal-notes', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const notes = await StudentPersonalNote.find({ studentId: req.userId })
+      .sort({ isPinned: -1, updatedAt: -1 })
+      .lean();
+    
+    res.json({
+      success: true,
+      notes: notes.map(n => ({
+        id: n._id.toString(),
+        title: n.title,
+        content: n.content,
+        subject: n.subject,
+        isPinned: n.isPinned,
+        color: n.color,
+        attachments: n.attachments || [],
+        createdAt: n.createdAt,
+        updatedAt: n.updatedAt
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch notes' });
+  }
+});
+
+// Create personal note
+app.post('/api/student/personal-notes', authRequired, requireRole('STUDENT'),
+  cloudUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const { title, content, subject, isPinned, color } = req.body;
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id
+        });
+      }
+    }
+    
+    const note = await StudentPersonalNote.create({
+      studentId: req.userId,
+      title,
+      content,
+      subject,
+      isPinned: isPinned === 'true' || isPinned === true,
+      color: color || '#FFFFFF',
+      attachments
+    });
+    
+    res.status(201).json({ success: true, note: { id: note._id.toString(), title: note.title } });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create note' });
+  }
+});
+
+// Update personal note
+app.put('/api/student/personal-notes/:id', authRequired, requireRole('STUDENT'),
+  cloudUpload.array('attachments', 5), async (req, res) => {
+  try {
+    const { title, content, subject, isPinned, color } = req.body;
+    
+    const note = await StudentPersonalNote.findOne({ _id: req.params.id, studentId: req.userId });
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    if (title) note.title = title;
+    if (content !== undefined) note.content = content;
+    if (subject !== undefined) note.subject = subject;
+    if (isPinned !== undefined) note.isPinned = isPinned === 'true' || isPinned === true;
+    if (color) note.color = color;
+    note.updatedAt = new Date();
+    
+    // Add new attachments
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        note.attachments.push({
+          filename: file.filename || file.public_id,
+          originalName: file.originalname,
+          url: file.path || file.secure_url,
+          type: file.originalname.split('.').pop().toLowerCase(),
+          size: file.size || file.bytes,
+          cloudinaryId: file.public_id
+        });
+      }
+    }
+    
+    await note.save();
+    
+    res.json({ success: true, note: { id: note._id.toString(), title: note.title } });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update note' });
+  }
+});
+
+// Delete personal note
+app.delete('/api/student/personal-notes/:id', authRequired, requireRole('STUDENT'), async (req, res) => {
+  try {
+    const note = await StudentPersonalNote.findOneAndDelete({ _id: req.params.id, studentId: req.userId });
+    
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    // Delete Cloudinary files
+    for (const att of note.attachments || []) {
+      if (att.cloudinaryId) {
+        try {
+          await cloudinary.uploader.destroy(att.cloudinaryId, { resource_type: 'raw' });
+        } catch (e) {}
+      }
+    }
+    
+    res.json({ success: true, message: 'Note deleted' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete note' });
   }
 });
 
