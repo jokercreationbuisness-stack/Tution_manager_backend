@@ -39,7 +39,9 @@
     "speakeasy": "^2.0.0",
     "google-auth-library": "^9.10.0",
     "nodemailer": "^6.9.14",
-    "resend": "^3.5.0"
+    "resend": "^3.5.0",
+    "groq-sdk": "^0.7.0",
+    "@google/generative-ai": "^0.17.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
